@@ -1,0 +1,91 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { query, queryOne } from '@/lib/db';
+
+// POST /api/contacts/import - Import contacts from CSV data
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  const { rows, field_mapping, default_stage, default_tags } = body;
+
+  if (!rows?.length || !field_mapping) {
+    return NextResponse.json({ error: 'Missing rows or field_mapping' }, { status: 400 });
+  }
+
+  const validFields = [
+    'email', 'phone', 'first_name', 'last_name', 'business_name',
+    'title', 'linkedin_url', 'website', 'lifecycle_stage', 'tags',
+  ];
+
+  let imported = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    try {
+      const mapped: Record<string, unknown> = {};
+      for (const [csvCol, dbField] of Object.entries(field_mapping)) {
+        if (validFields.includes(dbField as string) && row[csvCol] !== undefined) {
+          mapped[dbField as string] = row[csvCol];
+        }
+      }
+
+      // Must have at least email or phone
+      if (!mapped.email && !mapped.phone) {
+        skipped++;
+        continue;
+      }
+
+      // Apply defaults
+      if (!mapped.lifecycle_stage) mapped.lifecycle_stage = default_stage || 'raw';
+      if (default_tags?.length) {
+        mapped.tags = [...(Array.isArray(mapped.tags) ? mapped.tags : []), ...default_tags];
+      } else if (!mapped.tags) {
+        mapped.tags = [];
+      }
+
+      const result = await queryOne<{ contact_id: number; xmax: string }>(
+        `INSERT INTO crm.contacts (
+          email, phone, first_name, last_name, business_name,
+          title, linkedin_url, website, lifecycle_stage, tags
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (email) DO UPDATE SET
+          phone = COALESCE(EXCLUDED.phone, crm.contacts.phone),
+          first_name = COALESCE(EXCLUDED.first_name, crm.contacts.first_name),
+          last_name = COALESCE(EXCLUDED.last_name, crm.contacts.last_name),
+          business_name = COALESCE(EXCLUDED.business_name, crm.contacts.business_name),
+          title = COALESCE(EXCLUDED.title, crm.contacts.title),
+          linkedin_url = COALESCE(EXCLUDED.linkedin_url, crm.contacts.linkedin_url),
+          website = COALESCE(EXCLUDED.website, crm.contacts.website),
+          updated_at = NOW()
+        RETURNING contact_id, xmax::text`,
+        [
+          mapped.email || null, mapped.phone || null,
+          mapped.first_name || null, mapped.last_name || null,
+          mapped.business_name || null, mapped.title || null,
+          mapped.linkedin_url || null, mapped.website || null,
+          mapped.lifecycle_stage, mapped.tags || [],
+        ]
+      );
+
+      // xmax = '0' means INSERT, otherwise UPDATE
+      if (result?.xmax === '0') {
+        imported++;
+      } else {
+        updated++;
+      }
+    } catch (err) {
+      errors.push(`Row ${i + 1}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      skipped++;
+    }
+  }
+
+  return NextResponse.json({
+    success: true,
+    imported,
+    updated,
+    skipped,
+    total: rows.length,
+    errors: errors.slice(0, 10),
+  });
+}
