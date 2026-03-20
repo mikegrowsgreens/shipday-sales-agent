@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, query } from '@/lib/db';
-import { getTenantFromSession } from '@/lib/tenant';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/settings/integrations
@@ -8,8 +8,8 @@ import { getTenantFromSession } from '@/lib/tenant';
  */
 export async function GET() {
   try {
-    const tenant = await getTenantFromSession();
-    const orgId = tenant?.org_id || 1;
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
 
     const org = await queryOne<{ settings: Record<string, unknown> }>(
       `SELECT settings FROM crm.organizations WHERE org_id = $1`,
@@ -37,11 +37,11 @@ export async function GET() {
  */
 export async function PATCH(request: NextRequest) {
   try {
-    const tenant = await getTenantFromSession();
-    if (tenant && tenant.role !== 'admin') {
+    const tenant = await requireTenantSession();
+    if (tenant.role !== 'admin') {
       return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
     }
-    const orgId = tenant?.org_id || 1;
+    const orgId = tenant.org_id;
 
     const body = await request.json();
 

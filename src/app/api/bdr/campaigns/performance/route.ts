@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/campaigns/performance
@@ -10,6 +11,8 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const days = parseInt(request.nextUrl.searchParams.get('days') || '30');
 
     // 1. Daily send/open/reply/click time series
@@ -29,9 +32,10 @@ export async function GET(request: NextRequest) {
       FROM bdr.email_sends
       WHERE sent_at >= NOW() - INTERVAL '1 day' * $1
         AND sent_at IS NOT NULL
+        AND org_id = $2
       GROUP BY DATE(sent_at)
       ORDER BY date ASC
-    `, [days]);
+    `, [days, orgId]);
 
     // 2. Angle performance comparison
     const anglePerf = await query<{
@@ -58,9 +62,10 @@ export async function GET(request: NextRequest) {
       FROM bdr.email_sends
       WHERE sent_at >= NOW() - INTERVAL '1 day' * $1
         AND sent_at IS NOT NULL
+        AND org_id = $2
       GROUP BY angle
       ORDER BY reply_rate DESC
-    `, [days]);
+    `, [days, orgId]);
 
     // 3. Tier performance breakdown
     const tierPerf = await query<{
@@ -82,9 +87,10 @@ export async function GET(request: NextRequest) {
       JOIN bdr.leads l ON l.lead_id = es.lead_id
       WHERE es.sent_at >= NOW() - INTERVAL '1 day' * $1
         AND es.sent_at IS NOT NULL
+        AND es.org_id = $2
       GROUP BY l.tier
       ORDER BY tier
-    `, [days]);
+    `, [days, orgId]);
 
     // 4. Reply sentiment distribution
     const sentimentDist = await query<{ sentiment: string; count: string }>(`
@@ -94,9 +100,10 @@ export async function GET(request: NextRequest) {
       FROM bdr.email_sends
       WHERE replied = true
         AND sent_at >= NOW() - INTERVAL '1 day' * $1
+        AND org_id = $2
       GROUP BY reply_sentiment
       ORDER BY count DESC
-    `, [days]);
+    `, [days, orgId]);
 
     // 5. Best hour to send (by open rate)
     const bestHours = await query<{
@@ -113,10 +120,11 @@ export async function GET(request: NextRequest) {
       FROM bdr.email_sends
       WHERE sent_at >= NOW() - INTERVAL '1 day' * $1
         AND sent_at IS NOT NULL
+        AND org_id = $2
       GROUP BY EXTRACT(HOUR FROM sent_at AT TIME ZONE 'America/Los_Angeles')
       HAVING COUNT(*) >= 3
       ORDER BY open_rate DESC
-    `, [days]);
+    `, [days, orgId]);
 
     // 6. Overall summary
     const summary = await query<Record<string, string>>(`
@@ -131,7 +139,8 @@ export async function GET(request: NextRequest) {
       FROM bdr.email_sends
       WHERE sent_at >= NOW() - INTERVAL '1 day' * $1
         AND sent_at IS NOT NULL
-    `, [days]);
+        AND org_id = $2
+    `, [days, orgId]);
 
     // 7. A/B test results (if any)
     const abResults = await query<{
@@ -158,9 +167,10 @@ export async function GET(request: NextRequest) {
       FROM bdr.email_sends
       WHERE ab_test_id IS NOT NULL
         AND sent_at >= NOW() - INTERVAL '1 day' * $1
+        AND org_id = $2
       GROUP BY ab_test_id, variant_id, angle
       ORDER BY ab_test_id, reply_rate DESC
-    `, [days]);
+    `, [days, orgId]);
 
     return NextResponse.json({
       days,

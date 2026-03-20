@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Zap } from 'lucide-react';
 
 export default function LoginPage() {
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -18,14 +19,15 @@ export default function LoginPage() {
     const res = await fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ email, password }),
     });
 
     if (res.ok) {
       router.push('/');
       router.refresh();
     } else {
-      setError('Invalid password');
+      const data = await res.json().catch(() => ({}));
+      setError(data.error || 'Invalid credentials');
       setLoading(false);
     }
   }
@@ -37,12 +39,25 @@ export default function LoginPage() {
           <div className="flex items-center justify-center gap-2 mb-2">
             <Zap className="w-6 h-6 text-blue-400" />
           </div>
-          <h1 className="text-2xl font-bold text-white">Shipday Sales Hub</h1>
+          <h1 className="text-2xl font-bold text-white">SalesHub</h1>
           <p className="text-sm text-gray-400 mt-1">Unified CRM & Outreach Platform</p>
         </div>
 
         <form onSubmit={handleSubmit} className="bg-gray-900 border border-gray-800 rounded-xl p-6">
           <label className="block text-sm font-medium text-gray-300 mb-2">
+            Email
+          </label>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="you@company.com"
+            autoFocus
+            required
+          />
+
+          <label className="block text-sm font-medium text-gray-300 mb-2 mt-4">
             Password
           </label>
           <input
@@ -50,8 +65,8 @@ export default function LoginPage() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="Enter dashboard password"
-            autoFocus
+            placeholder="Enter your password"
+            required
           />
 
           {error && (

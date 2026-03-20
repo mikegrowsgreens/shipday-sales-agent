@@ -84,26 +84,33 @@ export function channelIcon(channel: string): string {
   return icons[channel] || 'Circle';
 }
 
-// Territory area codes for WA, NV, ID, MT, AK
-export const TERRITORY_AREA_CODES: Record<string, number[]> = {
-  WA: [206, 253, 360, 425, 509, 564],
-  NV: [702, 725, 775],
-  ID: [208, 986],
-  MT: [406],
-  AK: [907],
-};
+// Territory functions — now configurable per-org via org-config.
+// Legacy exports kept for backward compatibility; callers should
+// migrate to isInOrgTerritory / getStateFromOrgAreaCode from org-config.ts.
 
-export const ALL_TERRITORY_CODES = Object.values(TERRITORY_AREA_CODES).flat();
+/** @deprecated Territory codes are now per-org. Use org-config.ts helpers. */
+export const TERRITORY_AREA_CODES: Record<string, number[]> = {};
+/** @deprecated Use getTerritoryAreaCodes from org-config.ts */
+export const ALL_TERRITORY_CODES: number[] = [];
 
-export function isInTerritory(phone: string | null): boolean {
+/**
+ * Check if phone is in territory. Accepts optional area codes array.
+ * With no codes, returns true (no territory = all contacts in territory).
+ * @deprecated Use isInOrgTerritory from org-config.ts
+ */
+export function isInTerritory(phone: string | null, areaCodes?: number[]): boolean {
   if (!phone) return false;
+  const codes = areaCodes || ALL_TERRITORY_CODES;
+  if (codes.length === 0) return true;
   const cleaned = phone.replace(/\D/g, '');
   const areaCode = parseInt(cleaned.startsWith('1') ? cleaned.slice(1, 4) : cleaned.slice(0, 3));
-  return ALL_TERRITORY_CODES.includes(areaCode);
+  return codes.includes(areaCode);
 }
 
-export function getStateFromAreaCode(areaCode: number): string | null {
-  for (const [state, codes] of Object.entries(TERRITORY_AREA_CODES)) {
+/** @deprecated Use getStateFromOrgAreaCode from org-config.ts */
+export function getStateFromAreaCode(areaCode: number, territoryMap?: Record<string, number[]>): string | null {
+  const map = territoryMap || TERRITORY_AREA_CODES;
+  for (const [state, codes] of Object.entries(map)) {
     if (codes.includes(areaCode)) return state;
   }
   return null;

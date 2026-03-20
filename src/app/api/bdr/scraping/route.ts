@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 
 /**
  * GET /api/bdr/scraping
@@ -7,6 +9,8 @@ import { query } from '@/lib/db';
  */
 export async function GET() {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     // Check if scraping_jobs table exists — if not, return empty
     const tableCheck = await query<{ exists: boolean }>(
       `SELECT EXISTS (
@@ -24,8 +28,10 @@ export async function GET() {
               status, leads_found, leads_new, started_at, completed_at,
               error_message, created_at
        FROM bdr.scraping_jobs
+       WHERE org_id = $1
        ORDER BY created_at DESC
        LIMIT 50`,
+      [orgId]
     );
 
     return NextResponse.json({ jobs });
@@ -41,6 +47,7 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
     const body = await request.json();
     const { search_query, city, state, cuisine_type, max_results } = body as {
       search_query?: string;
@@ -54,7 +61,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'city or search_query required' }, { status: 400 });
     }
 
-    const webhookUrl = `${process.env.N8N_BASE_URL || 'https://automation.mikegrowsgreens.com'}/webhook/bdr-scrape-trigger`;
+    const webhookUrl = `${process.env.N8N_BASE_URL || ''}/webhook/bdr-scrape-trigger`;
 
     const payload = {
       search_query: search_query || `${cuisine_type || 'restaurant'} in ${city}, ${state}`,
@@ -62,14 +69,16 @@ export async function POST(request: NextRequest) {
       state,
       cuisine_type,
       max_results: max_results || 50,
+      org_id: tenant.org_id,
       triggered_by: 'saleshub',
       triggered_at: new Date().toISOString(),
     };
 
-    const res = await fetch(webhookUrl, {
+    const res = await fetchWithTimeout(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      timeout: 60000,
     });
 
     if (!res.ok) {

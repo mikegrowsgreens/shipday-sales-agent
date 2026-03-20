@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { preprocessEmail } from '@/lib/email-tracking';
+import { getOrgConfigFromSession, DEFAULT_CONFIG } from '@/lib/org-config';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
+import { trackUsage } from '@/lib/usage';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { buildSignatureHtml, getStoredSignature } from '@/lib/test-send';
 
 /**
  * POST /api/bdr/campaigns/action
@@ -11,12 +17,18 @@ import { preprocessEmail } from '@/lib/email-tracking';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'campaigns');
+
     const body = await request.json();
-    const { lead_ids, action, send_at, deviation_minutes } = body as {
+    const { lead_ids, action, send_at, deviation_minutes, thread_send_id } = body as {
       lead_ids: number[];
       action: 'approve' | 'reject' | 'hold';
       send_at?: string;
       deviation_minutes?: number;
+      thread_send_id?: string;
     };
 
     if (!lead_ids?.length || !action) {
@@ -34,19 +46,18 @@ export async function POST(request: NextRequest) {
     };
 
     const newStatus = statusMap[action];
-    const placeholders = lead_ids.map((_, i) => `$${i + 2}`).join(',');
+    const placeholders = lead_ids.map((_: number, i: number) => `$${i + 3}`).join(',');
 
     // Update lead statuses
     await query(
-      `UPDATE bdr.leads SET status = $1, updated_at = NOW() WHERE lead_id IN (${placeholders})`,
-      [newStatus, ...lead_ids]
+      `UPDATE bdr.leads SET status = $1, updated_at = NOW() WHERE lead_id IN (${placeholders}) AND org_id = $2`,  // org_id uses $2 param
+      [newStatus, tenant.org_id, ...lead_ids]
     );
 
     let stepsScheduled = 0;
 
     // On approve: create email_sends records, preprocess with tracking, fire webhook
     if (action === 'approve') {
-      const approvedPlaceholders = lead_ids.map((_: number, i: number) => `$${i + 1}`).join(',');
       const approvedLeads = await query<{
         lead_id: number;
         contact_email: string;
@@ -61,11 +72,14 @@ export async function POST(request: NextRequest) {
         `SELECT lead_id, contact_email, contact_name, business_name,
                 email_subject, email_body, email_angle,
                 campaign_template_id, campaign_step
-         FROM bdr.leads WHERE lead_id IN (${approvedPlaceholders})`,
-        lead_ids
+         FROM bdr.leads WHERE lead_id = ANY($1) AND org_id = $2`,
+        [lead_ids, tenant.org_id]
       );
 
-      const webhookUrl = `${process.env.N8N_BASE_URL || 'https://automation.mikegrowsgreens.com'}/webhook/dashboard-send-approved`;
+      const orgConfig = await getOrgConfigFromSession().catch(() => DEFAULT_CONFIG);
+      const senderEmail = orgConfig.persona?.sender_email || 'sales@example.com';
+      const storedSignature = await getStoredSignature(tenant.org_id);
+      const webhookUrl = `${process.env.N8N_BASE_URL || ''}/webhook/dashboard-send-approved`;
 
       // Compute per-lead send times with deviation
       const computeLeadSendAt = (): string | undefined => {
@@ -79,32 +93,59 @@ export async function POST(request: NextRequest) {
         return base.toISOString();
       };
 
+      // Look up threading headers if thread_send_id is provided
+      let threadingHeaders: { in_reply_to?: string; references?: string; thread_subject?: string } = {};
+      if (thread_send_id) {
+        const threadRows = await query<{ id: string; subject: string; message_id: string | null }>(
+          `SELECT id, subject, message_id FROM bdr.email_sends WHERE id = $1::uuid AND org_id = $2`,
+          [thread_send_id, tenant.org_id]
+        );
+        if (threadRows.length > 0) {
+          const orig = threadRows[0];
+          const messageId = orig.message_id || `<${orig.id}@saleshub>`;
+          threadingHeaders = {
+            in_reply_to: messageId,
+            references: messageId,
+            thread_subject: orig.subject,
+          };
+        }
+      }
+
       for (const lead of approvedLeads) {
         const leadSendAt = computeLeadSendAt();
 
         try {
           // Create email_sends record (returns the UUID we use for tracking)
           const sendRows = await query<{ id: string }>(
-            `INSERT INTO bdr.email_sends (lead_id, to_email, from_email, subject, body, angle, email_type, created_at)
-             VALUES ($1, $2, 'mike@mikegrowsgreens.com', $3, $4, $5, 'bdr_outbound', NOW())
+            `INSERT INTO bdr.email_sends (lead_id, to_email, from_email, subject, body, angle, email_type, org_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'bdr_outbound', $7, NOW())
              RETURNING id`,
-            [lead.lead_id, lead.contact_email, lead.email_subject, lead.email_body, lead.email_angle]
+            [lead.lead_id, lead.contact_email, senderEmail, lead.email_subject, lead.email_body, lead.email_angle, tenant.org_id]
           );
 
           const sendId = sendRows[0]?.id;
           if (!sendId) continue;
 
-          // Preprocess email with tracking pixel + link rewriting
-          const trackedHtml = preprocessEmail(lead.email_body, sendId, false);
+          // Append signature and preprocess email with tracking pixel + link rewriting
+          const signature = storedSignature
+            ? `<br/><br/>${storedSignature}`
+            : buildSignatureHtml(
+                orgConfig.persona?.sender_name,
+                orgConfig.persona?.sender_title,
+                senderEmail,
+              );
+          const bodyWithSig = lead.email_body + signature;
+          const trackedHtml = preprocessEmail(bodyWithSig, sendId, false);
 
           // Fire webhook with tracking-enhanced email
-          await fetch(webhookUrl, {
+          await fetchWithTimeout(webhookUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               send_id: sendId,
               lead_id: lead.lead_id,
               to: lead.contact_email,
+              from: senderEmail,
               subject: lead.email_subject,
               body_html: trackedHtml,
               body_plain: lead.email_body,
@@ -113,7 +154,12 @@ export async function POST(request: NextRequest) {
               angle: lead.email_angle,
               campaign_step: lead.campaign_step || 1,
               ...(leadSendAt && { send_at: leadSendAt }),
+              ...(threadingHeaders.in_reply_to && {
+                in_reply_to: threadingHeaders.in_reply_to,
+                references: threadingHeaders.references,
+              }),
             }),
+            timeout: 30000,
           });
 
           // ── Campaign Step Advancement ──
@@ -124,15 +170,15 @@ export async function POST(request: NextRequest) {
             await query(
               `UPDATE bdr.campaign_emails
                SET status = 'sent', send_id = $1::uuid, sent_at = NOW(), updated_at = NOW()
-               WHERE lead_id = $2 AND template_id = $3 AND step_number = $4 AND status IN ('ready', 'scheduled')`,
-              [sendId, lead.lead_id, lead.campaign_template_id, lead.campaign_step]
+               WHERE lead_id = $2 AND template_id = $3 AND step_number = $4 AND status IN ('ready', 'scheduled') AND org_id = $5`,
+              [sendId, lead.lead_id, lead.campaign_template_id, lead.campaign_step, tenant.org_id]
             );
 
             // Find and schedule the next step
             const nextStep = await query<{ id: number; delay_days: number; step_number: number }>(
               `SELECT id, delay_days, step_number FROM bdr.campaign_emails
-               WHERE lead_id = $1 AND template_id = $2 AND step_number = $3 AND status = 'pending'`,
-              [lead.lead_id, lead.campaign_template_id, lead.campaign_step + 1]
+               WHERE lead_id = $1 AND template_id = $2 AND step_number = $3 AND status = 'pending' AND org_id = $4`,
+              [lead.lead_id, lead.campaign_template_id, lead.campaign_step + 1, tenant.org_id]
             );
 
             if (nextStep.length > 0) {
@@ -171,10 +217,14 @@ export async function POST(request: NextRequest) {
         await query(
           `UPDATE bdr.campaign_emails
            SET status = 'skipped', updated_at = NOW()
-           WHERE lead_id = $1 AND status IN ('pending', 'scheduled', 'ready')`,
-          [leadId]
+           WHERE lead_id = $1 AND status IN ('pending', 'scheduled', 'ready') AND org_id = $2`,
+          [leadId, tenant.org_id]
         );
       }
+    }
+
+    if (action === 'approve') {
+      trackUsage(tenant.org_id, 'emails_sent', lead_ids.length);
     }
 
     return NextResponse.json({
@@ -185,6 +235,9 @@ export async function POST(request: NextRequest) {
       ...(send_at && { scheduled_send_at: send_at }),
     });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[bdr-action] error:', error);
     return NextResponse.json({ error: 'Action failed' }, { status: 500 });
   }

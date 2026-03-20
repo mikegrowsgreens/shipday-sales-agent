@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryShipday } from '@/lib/db';
+import { queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * PATCH /api/followups/drafts/[id]
@@ -10,6 +11,8 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { id } = await params;
     const body = await request.json();
 
@@ -25,7 +28,7 @@ export async function PATCH(
       }
     }
 
-    // Mark as edited by Mike
+    // Mark as manually edited by user
     if (body.subject !== undefined || body.body_plain !== undefined) {
       sets.push(`mike_edited = true`);
     }
@@ -37,22 +40,22 @@ export async function PATCH(
     sets.push(`updated_at = NOW()`);
     values.push(parseInt(id));
 
-    await queryShipday(
-      `UPDATE shipday.email_drafts SET ${sets.join(', ')} WHERE id = $${pi}`,
+    await queryDeals(
+      `UPDATE deals.email_drafts SET ${sets.join(', ')} WHERE draft_id = $${pi}`,
       values,
     );
 
     // Log activity when content is edited
     if (body.subject !== undefined || body.body_plain !== undefined) {
-      const draft = await queryShipday<{ deal_id: string; touch_number: number }>(
-        `SELECT deal_id, touch_number FROM shipday.email_drafts WHERE id = $1`,
+      const draft = await queryDeals<{ deal_id: string; touch_number: number }>(
+        `SELECT deal_id, touch_number FROM deals.email_drafts WHERE draft_id = $1`,
         [parseInt(id)],
       );
       if (draft[0]) {
-        await queryShipday(
-          `INSERT INTO shipday.activity_log (deal_id, action_type, touch_number, notes, created_at)
-           VALUES ($1, 'draft_edited', $2, 'Manual edit', NOW())`,
-          [draft[0].deal_id, draft[0].touch_number],
+        await queryDeals(
+          `INSERT INTO deals.activity_log (deal_id, action_type, notes, created_at)
+           VALUES ($1, 'draft_edited', 'Manual edit', NOW())`,
+          [draft[0].deal_id],
         );
       }
     }

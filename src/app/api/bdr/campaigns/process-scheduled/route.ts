@@ -3,6 +3,9 @@ import { query } from '@/lib/db';
 import { preprocessEmail } from '@/lib/email-tracking';
 import { generateAdaptiveEmail, type EngagementSignalType } from '@/lib/ai';
 import { N8N_WEBHOOK_KEY, N8N_BASE_URL } from '@/lib/config';
+import { getOrgConfigFromSession, DEFAULT_CONFIG } from '@/lib/org-config';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { buildSignatureHtml, getStoredSignature } from '@/lib/test-send';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -65,6 +68,10 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const orgConfig = await getOrgConfigFromSession().catch(() => DEFAULT_CONFIG);
+    const senderEmail = orgConfig.persona?.sender_email || 'sales@example.com';
+    const storedSignature = await getStoredSignature();
+
     const queued: number[] = [];
     const autoSent: number[] = [];
     const skipped: number[] = [];
@@ -187,8 +194,18 @@ export async function POST(request: NextRequest) {
       // ─── Handle channel switch to non-email ───────────────────────────
       if (effectiveChannel !== 'email') {
         try {
-          const taskId = await createTaskForStep(email, effectiveChannel, engagement);
-          if (taskId) tasksCreated.push(taskId);
+          if (effectiveChannel === 'ai_chat') {
+            // ─── AI Chat: Generate tracking link for chatbot handoff ────
+            await triggerAIChatStep(email, engagement);
+            adapted.push({ lead_id: email.lead_id, signal: engagement.signal, action: 'ai_chat_link_generated' });
+          } else if (effectiveChannel === 'ai_call') {
+            // ─── AI Call: Trigger voice agent ──────────────────────────
+            await triggerAICallStep(email, engagement);
+            adapted.push({ lead_id: email.lead_id, signal: engagement.signal, action: 'ai_call_initiated' });
+          } else {
+            const taskId = await createTaskForStep(email, effectiveChannel, engagement);
+            if (taskId) tasksCreated.push(taskId);
+          }
 
           await query(
             `UPDATE bdr.campaign_emails SET status = 'sent', sent_at = NOW(), updated_at = NOW() WHERE id = $1`,
@@ -327,7 +344,11 @@ export async function POST(request: NextRequest) {
         try {
           await autoSendEmail(
             { ...email, subject: finalSubject, body: finalBody, angle: finalAngle },
-            leadData
+            leadData,
+            senderEmail,
+            orgConfig.persona?.sender_name,
+            orgConfig.persona?.sender_title,
+            storedSignature,
           );
           await scheduleNextStep(email.lead_id, email.template_id, email.step_number, delayReduction);
           autoSent.push(email.id);
@@ -377,24 +398,28 @@ export async function POST(request: NextRequest) {
       try {
         const sendRows = await query<{ id: string }>(
           `INSERT INTO bdr.email_sends (lead_id, to_email, from_email, subject, body, angle, email_type, created_at)
-           VALUES ($1, $2, 'mike@mikegrowsgreens.com', $3, $4, $5, 'bdr_outbound', NOW())
+           VALUES ($1, $2, $3, $4, $5, $6, 'bdr_outbound', NOW())
            RETURNING id`,
-          [lead.lead_id, lead.contact_email, lead.email_subject, lead.email_body, lead.email_angle]
+          [lead.lead_id, lead.contact_email, senderEmail, lead.email_subject, lead.email_body, lead.email_angle]
         );
 
         const sendId = sendRows[0]?.id;
         if (!sendId) continue;
 
-        const trackedHtml = preprocessEmail(lead.email_body, sendId, false);
+        const signature = storedSignature
+          ? `<br/><br/>${storedSignature}`
+          : buildSignatureHtml(orgConfig.persona?.sender_name, orgConfig.persona?.sender_title, senderEmail);
+        const trackedHtml = preprocessEmail(lead.email_body + signature, sendId, false);
 
         const webhookUrl = `${N8N_BASE_URL}/webhook/dashboard-send-approved`;
-        await fetch(webhookUrl, {
+        await fetchWithTimeout(webhookUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             send_id: sendId,
             lead_id: lead.lead_id,
             to: lead.contact_email,
+            from: senderEmail,
             subject: lead.email_subject,
             body_html: trackedHtml,
             body_plain: lead.email_body,
@@ -403,6 +428,7 @@ export async function POST(request: NextRequest) {
             angle: lead.email_angle,
             campaign_step: lead.campaign_step || 1,
           }),
+          timeout: 30000,
         });
 
         await query(
@@ -670,7 +696,7 @@ function formatEngagementNote(engagement: EngagementProfile): string {
     case 'opened_no_reply':
       return `Lead opened ${engagement.total_opens}x across ${engagement.total_sends} emails but hasn't replied. ${engagement.most_opened_angle ? `Most engaged with "${engagement.most_opened_angle.replace(/_/g, ' ')}" angle.` : ''} They're interested but need a different push.`;
     case 'clicked':
-      return `🔥 WARM LEAD — Clicked ${engagement.total_clicks} link(s)! They're actively exploring Shipday. Strike while iron is hot.`;
+      return `WARM LEAD -- Clicked ${engagement.total_clicks} link(s)! They're actively exploring the product. Strike while iron is hot.`;
     case 'multi_open':
       return `Lead has opened emails ${engagement.total_opens}x (${engagement.open_rate}% open rate). They keep re-reading — very interested but hesitant. Offer a specific, low-friction next step.`;
     default:
@@ -724,29 +750,37 @@ async function findOrCreateContact(
  */
 async function autoSendEmail(
   email: { id: number; lead_id: number; template_id: number; step_number: number; subject: string; body: string; angle: string },
-  leadData: { contact_email: string; contact_name: string; business_name: string }
+  leadData: { contact_email: string; contact_name: string; business_name: string },
+  fromEmail: string = 'sales@example.com',
+  senderName?: string,
+  senderTitle?: string,
+  savedSignature?: string | null,
 ) {
   const sendRows = await query<{ id: string }>(
     `INSERT INTO bdr.email_sends (lead_id, to_email, from_email, subject, body, angle, email_type, created_at)
-     VALUES ($1, $2, 'mike@mikegrowsgreens.com', $3, $4, $5, 'bdr_campaign', NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, 'bdr_campaign', NOW())
      RETURNING id`,
-    [email.lead_id, leadData.contact_email, email.subject, email.body, email.angle]
+    [email.lead_id, leadData.contact_email, fromEmail, email.subject, email.body, email.angle]
   );
 
   const sendId = sendRows[0]?.id;
   if (!sendId) throw new Error('No send ID returned');
 
-  const trackedHtml = preprocessEmail(email.body, sendId, false);
+  const signature = savedSignature
+    ? `<br/><br/>${savedSignature}`
+    : buildSignatureHtml(senderName, senderTitle, fromEmail);
+  const trackedHtml = preprocessEmail(email.body + signature, sendId, false);
 
   const webhookUrl = `${N8N_BASE_URL}/webhook/dashboard-send-approved`;
 
-  await fetch(webhookUrl, {
+  await fetchWithTimeout(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       send_id: sendId,
       lead_id: email.lead_id,
       to: leadData.contact_email,
+      from: fromEmail,
       subject: email.subject,
       body_html: trackedHtml,
       body_plain: email.body,
@@ -755,6 +789,7 @@ async function autoSendEmail(
       angle: email.angle,
       campaign_step: email.step_number,
     }),
+    timeout: 30000,
   });
 
   await query(
@@ -905,4 +940,111 @@ async function getOptimalSendHour(leadId: number): Promise<number | null> {
   }
 
   return null; // Insufficient data, use default scheduling
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AI CHANNEL STEP HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Trigger an AI Chat step by generating a tracking link.
+ * The link is embedded in the next email or sent as a standalone notification.
+ */
+async function triggerAIChatStep(
+  email: { id: number; lead_id: number; template_id: number; step_number: number },
+  engagement: EngagementProfile,
+) {
+  const leadRow = await query<{
+    contact_email: string | null;
+    contact_name: string | null;
+    business_name: string | null;
+    tier: string | null;
+    org_id: number;
+  }>(
+    `SELECT contact_email, contact_name, business_name, tier, org_id FROM bdr.leads WHERE lead_id = $1`,
+    [email.lead_id]
+  );
+  if (leadRow.length === 0) return;
+  const ld = leadRow[0];
+
+  // Get the template step definition for angle/variant
+  const stepRow = await query<{ angle: string | null; tone: string | null }>(
+    `SELECT angle, tone FROM bdr.campaign_emails WHERE id = $1`,
+    [email.id]
+  );
+  const angle = stepRow[0]?.angle || null;
+
+  // Generate tracking link via the chat-link API
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || '';
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/chat-link`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      lead_id: email.lead_id,
+      campaign_email_id: email.id,
+      campaign_template_id: email.template_id,
+      campaign_step: email.step_number,
+      tier: ld.tier,
+      angle,
+      variant: null,
+      business_name: ld.business_name,
+      contact_name: ld.contact_name,
+      contact_email: ld.contact_email,
+      org_id: ld.org_id,
+    }),
+    timeout: 15000,
+  });
+
+  const data = await res.json();
+  if (!data.chat_link) throw new Error('Failed to generate chat link');
+
+  // Record touchpoint
+  const contactId = await findOrCreateContact(email.lead_id, {
+    contact_name: ld.contact_name,
+    contact_email: ld.contact_email,
+    business_name: ld.business_name,
+    phone: null,
+  });
+  if (contactId) {
+    await query(
+      `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, subject, metadata, occurred_at)
+       VALUES ($1, 'ai_chat', 'chat_link_sent', 'outbound', 'campaign',
+               'AI chat link generated',
+               jsonb_build_object('lead_id', $2, 'campaign_step', $3, 'tracking_token', $4, 'engagement_signal', $5),
+               NOW())`,
+      [contactId, email.lead_id, email.step_number, data.tracking_token, engagement.signal]
+    );
+  }
+}
+
+/**
+ * Trigger an AI Call step by invoking the voice agent.
+ */
+async function triggerAICallStep(
+  email: { id: number; lead_id: number; template_id: number; step_number: number },
+  engagement: EngagementProfile,
+) {
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || '';
+
+  // Use the voice-trigger API to initiate the call
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/voice-trigger`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      lead_id: email.lead_id,
+      campaign_email_id: email.id,
+      trigger_reason: 'campaign_step',
+      campaign_template_id: email.template_id,
+      campaign_step: email.step_number,
+    }),
+    timeout: 30000,
+  });
+
+  const data = await res.json();
+  if (data.error) {
+    console.warn(`[process-scheduled] AI call trigger warning for lead ${email.lead_id}:`, data.error);
+    // If voice agent is unavailable, fall back to creating a human call task
+    if (data.fallback === 'task_created') return;
+    throw new Error(data.error);
+  }
 }

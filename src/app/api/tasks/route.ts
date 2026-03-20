@@ -1,17 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { updateTaskSchema } from '@/lib/validators/tasks';
 
 // GET /api/tasks - List pending tasks with contact info
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = new URL(request.url);
     const status = searchParams.get('status') || 'pending';
     const taskType = searchParams.get('type');
     const limit = parseInt(searchParams.get('limit') || '50');
 
-    let whereClause = `t.status = $1`;
-    const params: unknown[] = [status];
-    let idx = 2;
+    let whereClause = `t.org_id = $1 AND t.status = $2`;
+    const params: unknown[] = [orgId, status];
+    let idx = 3;
 
     if (taskType) {
       whereClause += ` AND t.task_type = $${idx++}`;
@@ -49,12 +53,14 @@ export async function GET(request: NextRequest) {
 // PATCH /api/tasks - Complete/skip a task
 export async function PATCH(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
-    const { task_id, status, outcome, notes } = body;
-
-    if (!task_id || !status) {
-      return NextResponse.json({ error: 'task_id and status required' }, { status: 400 });
+    const parsed = updateTaskSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
     }
+    const { task_id, status, outcome, notes } = parsed.data;
 
     const task = await queryOne<{
       task_id: number;
@@ -65,9 +71,9 @@ export async function PATCH(request: NextRequest) {
     }>(
       `UPDATE crm.task_queue
        SET status = $1, outcome = $2, completed_at = CASE WHEN $1 IN ('completed','skipped') THEN NOW() ELSE NULL END
-       WHERE task_id = $3
+       WHERE task_id = $3 AND org_id = $4
        RETURNING *`,
-      [status, outcome || notes || null, task_id]
+      [status, outcome || notes || null, task_id, orgId]
     );
 
     if (!task) {
@@ -81,14 +87,15 @@ export async function PATCH(request: NextRequest) {
                       task.task_type === 'sms' ? 'sms' : 'manual';
 
       await query(
-        `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, body_preview, metadata, occurred_at)
-         VALUES ($1, $2, $3, 'outbound', 'saleshub', $4, $5, NOW())`,
+        `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, body_preview, metadata, occurred_at, org_id)
+         VALUES ($1, $2, $3, 'outbound', 'saleshub', $4, $5, NOW(), $6)`,
         [
           task.contact_id,
           channel,
           task.task_type === 'call' ? 'call_completed' : `${task.task_type}_completed`,
           outcome || notes || null,
           JSON.stringify({ task_id: task.task_id, task_type: task.task_type }),
+          orgId,
         ]
       );
 
@@ -97,8 +104,8 @@ export async function PATCH(request: NextRequest) {
         await query(
           `UPDATE crm.sequence_step_executions
            SET status = 'completed', executed_at = NOW()
-           WHERE enrollment_id = $1 AND step_id = $2 AND status = 'pending'`,
-          [task.enrollment_id, task.step_id]
+           WHERE enrollment_id = $1 AND step_id = $2 AND status = 'pending' AND org_id = $3`,
+          [task.enrollment_id, task.step_id, orgId]
         );
       }
     }

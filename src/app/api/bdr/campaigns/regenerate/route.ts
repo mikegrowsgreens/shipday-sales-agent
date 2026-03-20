@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { generateEmail, loadEmailBrainContext } from '@/lib/ai';
+import { requireTenantSession } from '@/lib/tenant';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
 
 /**
  * POST /api/bdr/campaigns/regenerate
@@ -8,6 +10,12 @@ import { generateEmail, loadEmailBrainContext } from '@/lib/ai';
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { leadId, lead_id, angle, tone, instructions, length_preference } = body;
     const resolvedLeadId = leadId || lead_id;
@@ -35,8 +43,8 @@ export async function POST(request: NextRequest) {
       `SELECT lead_id, business_name, contact_name, contact_email, city, state,
               tier, cuisine_type, google_rating, google_review_count,
               email_subject, email_body, email_angle
-       FROM bdr.leads WHERE lead_id = $1`,
-      [resolvedLeadId]
+       FROM bdr.leads WHERE lead_id = $1 AND org_id = $2`,
+      [resolvedLeadId, orgId]
     );
 
     if (!lead) {
@@ -74,8 +82,8 @@ export async function POST(request: NextRequest) {
       `UPDATE bdr.leads
        SET email_subject = $1, email_body = $2, email_angle = $3,
            email_variant_id = $4, status = 'email_ready', updated_at = NOW()
-       WHERE lead_id = $5`,
-      [email.subject, email.body, selectedAngle, `regen_${Date.now()}`, resolvedLeadId]
+       WHERE lead_id = $5 AND org_id = $6`,
+      [email.subject, email.body, selectedAngle, `regen_${Date.now()}`, resolvedLeadId, orgId]
     );
 
     return NextResponse.json({

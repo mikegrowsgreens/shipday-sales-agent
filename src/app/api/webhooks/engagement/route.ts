@@ -11,20 +11,39 @@ export async function GET(request: NextRequest) {
 
   if (contactId) {
     try {
-      // Log open event as touchpoint
+      // Look up the contact's org_id for tenant-scoped writes
+      const contactRow = await query<{ org_id: number }>(
+        `SELECT org_id FROM crm.contacts WHERE contact_id = $1 LIMIT 1`,
+        [parseInt(contactId)]
+      );
+      const contactOrgId = contactRow[0]?.org_id;
+      if (!contactOrgId) {
+        // Contact not found — skip tracking silently
+        return new NextResponse(PIXEL, {
+          headers: {
+            'Content-Type': 'image/gif',
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            Pragma: 'no-cache',
+            Expires: '0',
+          },
+        });
+      }
+
+      // Log open event as touchpoint — scoped to contact's org
       await query(
-        `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, metadata)
-         VALUES ($1, 'email', 'opened', 'outbound', 'saleshub', $2)`,
+        `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, metadata, org_id)
+         VALUES ($1, 'email', 'opened', 'outbound', 'saleshub', $2, $3)`,
         [
           parseInt(contactId),
           JSON.stringify({ execution_id: executionId, user_agent: request.headers.get('user-agent') }),
+          contactOrgId,
         ]
       );
 
-      // Update engagement score
+      // Update engagement score — scoped to contact's org
       await query(
-        `UPDATE crm.contacts SET engagement_score = engagement_score + 1 WHERE contact_id = $1`,
-        [parseInt(contactId)]
+        `UPDATE crm.contacts SET engagement_score = engagement_score + 1 WHERE contact_id = $1 AND org_id = $2`,
+        [parseInt(contactId), contactOrgId]
       );
 
       // If linked to a sequence execution, update its status

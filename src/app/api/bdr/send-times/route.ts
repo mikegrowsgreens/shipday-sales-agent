@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/send-times
@@ -8,12 +9,15 @@ import { query } from '@/lib/db';
  * Returns:
  * - Hourly open/reply rates (0-23)
  * - Day-of-week open/reply rates (0=Sun, 6=Sat)
- * - Heatmap data (hour × day-of-week)
+ * - Heatmap data (hour x day-of-week)
  * - Recommended optimal windows
  * - Per-tier breakdown if sufficient data
  */
 export async function GET() {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     // ─── Hourly performance ─────────────────────────────────────────────
     const hourlyData = await query<{
       hour: number;
@@ -23,8 +27,8 @@ export async function GET() {
       replied: number;
       open_rate: number;
       reply_rate: number;
-    }>(`
-      SELECT
+    }>(
+      `SELECT
         EXTRACT(HOUR FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')::int as hour,
         COUNT(*)::int as sent,
         COUNT(CASE WHEN es.open_count > 0 THEN 1 END)::int as opened,
@@ -33,11 +37,13 @@ export async function GET() {
         ROUND(COUNT(CASE WHEN es.open_count > 0 THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::float as open_rate,
         ROUND(COUNT(CASE WHEN es.replied THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::float as reply_rate
       FROM bdr.email_sends es
-      WHERE es.sent_at >= NOW() - INTERVAL '90 days'
+      WHERE es.org_id = $1
+        AND es.sent_at >= NOW() - INTERVAL '90 days'
         AND es.sent_at IS NOT NULL
       GROUP BY EXTRACT(HOUR FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')
-      ORDER BY hour
-    `);
+      ORDER BY hour`,
+      [orgId]
+    );
 
     // ─── Day-of-week performance ────────────────────────────────────────
     const dowData = await query<{
@@ -49,8 +55,8 @@ export async function GET() {
       replied: number;
       open_rate: number;
       reply_rate: number;
-    }>(`
-      SELECT
+    }>(
+      `SELECT
         EXTRACT(DOW FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')::int as dow,
         TO_CHAR(es.sent_at AT TIME ZONE 'America/Los_Angeles', 'Day') as day_name,
         COUNT(*)::int as sent,
@@ -60,35 +66,39 @@ export async function GET() {
         ROUND(COUNT(CASE WHEN es.open_count > 0 THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::float as open_rate,
         ROUND(COUNT(CASE WHEN es.replied THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::float as reply_rate
       FROM bdr.email_sends es
-      WHERE es.sent_at >= NOW() - INTERVAL '90 days'
+      WHERE es.org_id = $1
+        AND es.sent_at >= NOW() - INTERVAL '90 days'
         AND es.sent_at IS NOT NULL
       GROUP BY EXTRACT(DOW FROM es.sent_at AT TIME ZONE 'America/Los_Angeles'),
                TO_CHAR(es.sent_at AT TIME ZONE 'America/Los_Angeles', 'Day')
-      ORDER BY dow
-    `);
+      ORDER BY dow`,
+      [orgId]
+    );
 
-    // ─── Heatmap: hour × day-of-week ───────────────────────────────────
+    // ─── Heatmap: hour x day-of-week ───────────────────────────────────
     const heatmapData = await query<{
       dow: number;
       hour: number;
       sent: number;
       opened: number;
       open_rate: number;
-    }>(`
-      SELECT
+    }>(
+      `SELECT
         EXTRACT(DOW FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')::int as dow,
         EXTRACT(HOUR FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')::int as hour,
         COUNT(*)::int as sent,
         COUNT(CASE WHEN es.open_count > 0 THEN 1 END)::int as opened,
         ROUND(COUNT(CASE WHEN es.open_count > 0 THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::float as open_rate
       FROM bdr.email_sends es
-      WHERE es.sent_at >= NOW() - INTERVAL '90 days'
+      WHERE es.org_id = $1
+        AND es.sent_at >= NOW() - INTERVAL '90 days'
         AND es.sent_at IS NOT NULL
       GROUP BY EXTRACT(DOW FROM es.sent_at AT TIME ZONE 'America/Los_Angeles'),
                EXTRACT(HOUR FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')
       HAVING COUNT(*) >= 3
-      ORDER BY dow, hour
-    `);
+      ORDER BY dow, hour`,
+      [orgId]
+    );
 
     // ─── Per-tier breakdown ─────────────────────────────────────────────
     const tierHourly = await query<{
@@ -98,8 +108,8 @@ export async function GET() {
       opened: number;
       open_rate: number;
       reply_rate: number;
-    }>(`
-      SELECT
+    }>(
+      `SELECT
         l.tier,
         EXTRACT(HOUR FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')::int as hour,
         COUNT(*)::int as sent,
@@ -107,41 +117,47 @@ export async function GET() {
         ROUND(COUNT(CASE WHEN es.open_count > 0 THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::float as open_rate,
         ROUND(COUNT(CASE WHEN es.replied THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::float as reply_rate
       FROM bdr.email_sends es
-      JOIN bdr.leads l ON l.lead_id = es.lead_id
-      WHERE es.sent_at >= NOW() - INTERVAL '90 days'
+      JOIN bdr.leads l ON l.lead_id = es.lead_id AND l.org_id = es.org_id
+      WHERE es.org_id = $1
+        AND es.sent_at >= NOW() - INTERVAL '90 days'
         AND es.sent_at IS NOT NULL
         AND l.tier IS NOT NULL
       GROUP BY l.tier, EXTRACT(HOUR FROM es.sent_at AT TIME ZONE 'America/Los_Angeles')
       HAVING COUNT(*) >= 3
-      ORDER BY l.tier, hour
-    `);
+      ORDER BY l.tier, hour`,
+      [orgId]
+    );
 
     // ─── Open time analysis (when opens happen, not sends) ──────────────
     const openTimeData = await query<{
       hour: number;
       total_opens: number;
-    }>(`
-      SELECT
+    }>(
+      `SELECT
         EXTRACT(HOUR FROM ee.event_at AT TIME ZONE 'America/Los_Angeles')::int as hour,
         COUNT(*)::int as total_opens
       FROM bdr.email_events ee
-      WHERE ee.event_type = 'open'
+      WHERE ee.org_id = $1
+        AND ee.event_type = 'open'
         AND ee.event_at >= NOW() - INTERVAL '90 days'
       GROUP BY EXTRACT(HOUR FROM ee.event_at AT TIME ZONE 'America/Los_Angeles')
-      ORDER BY hour
-    `);
+      ORDER BY hour`,
+      [orgId]
+    );
 
     // ─── Calculate optimal windows ──────────────────────────────────────
     const optimalWindows = calculateOptimalWindows(hourlyData, dowData);
 
     // ─── Total stats ────────────────────────────────────────────────────
-    const [totals] = await query<{ total_sent: number; total_days: number }>(`
-      SELECT COUNT(*)::int as total_sent,
+    const [totals] = await query<{ total_sent: number; total_days: number }>(
+      `SELECT COUNT(*)::int as total_sent,
              GREATEST(EXTRACT(DAYS FROM (MAX(sent_at) - MIN(sent_at))), 1)::int as total_days
       FROM bdr.email_sends
-      WHERE sent_at >= NOW() - INTERVAL '90 days'
-        AND sent_at IS NOT NULL
-    `);
+      WHERE org_id = $1
+        AND sent_at >= NOW() - INTERVAL '90 days'
+        AND sent_at IS NOT NULL`,
+      [orgId]
+    );
 
     return NextResponse.json({
       hourly: hourlyData,

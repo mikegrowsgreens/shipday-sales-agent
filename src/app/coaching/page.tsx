@@ -295,9 +295,9 @@ export default function CoachingPage() {
 
   const talkRatioLabel = (ratio: number | null) => {
     if (ratio === null) return null;
-    if (ratio > 0.7) return 'Talking too much — let the prospect speak more';
-    if (ratio > 0.6) return 'Slightly over-talking — aim for 40-60% range';
-    if (ratio < 0.35) return 'Great listening — make sure you\'re also guiding the conversation';
+    if (ratio > 0.7) return 'Talking too much -- let the prospect speak more';
+    if (ratio > 0.6) return 'Slightly over-talking -- aim for 40-60% range';
+    if (ratio < 0.35) return 'Great listening -- make sure you\'re also guiding the conversation';
     return 'Good balance';
   };
 
@@ -397,7 +397,7 @@ export default function CoachingPage() {
               <h2 className="text-lg font-semibold text-white mb-2">AI Sales Coach</h2>
               <p className="text-sm text-gray-400 mb-4 max-w-md mx-auto">
                 Get specific, data-driven coaching based on your last 14 days of performance.
-                Not generic tips — real insights from your actual numbers.
+                Not generic tips -- real insights from your actual numbers.
               </p>
               <button
                 onClick={fetchCoaching}
@@ -562,7 +562,7 @@ export default function CoachingPage() {
                           <div className="flex items-start gap-2">
                             <AlertTriangle className="w-3 h-3 text-yellow-400 mt-0.5 shrink-0" />
                             <p className="text-xs text-yellow-300">
-                              Longest monologue: {Math.round(call.longest_monologue_seconds / 60)}min — try to break up long stretches with questions
+                              Longest monologue: {Math.round(call.longest_monologue_seconds / 60)}min -- try to break up long stretches with questions
                             </p>
                           </div>
                         )}

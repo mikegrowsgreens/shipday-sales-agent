@@ -44,23 +44,26 @@ export async function POST(request: NextRequest) {
 
     for (const reply of replies) {
       try {
-        // ─── Find the email_sends record ──────────────────────────────────
+        // ─── Find the email_sends record + derive org_id ──────────────────
         let sendId = reply.send_id;
+        let orgId: number | null = null;
 
         if (!sendId && reply.gmail_thread_id) {
-          const row = await query<{ id: string }>(
-            `SELECT id FROM bdr.email_sends WHERE gmail_thread_id = $1 LIMIT 1`,
+          const row = await query<{ id: string; org_id: number }>(
+            `SELECT id, org_id FROM bdr.email_sends WHERE gmail_thread_id = $1 LIMIT 1`,
             [reply.gmail_thread_id]
           );
           sendId = row[0]?.id;
+          orgId = row[0]?.org_id ?? null;
         }
 
         if (!sendId && reply.lead_id) {
-          const row = await query<{ id: string }>(
-            `SELECT id FROM bdr.email_sends WHERE lead_id = $1 ORDER BY sent_at DESC LIMIT 1`,
+          const row = await query<{ id: string; org_id: number }>(
+            `SELECT id, org_id FROM bdr.email_sends WHERE lead_id = $1 ORDER BY sent_at DESC LIMIT 1`,
             [reply.lead_id]
           );
           sendId = row[0]?.id;
+          orgId = row[0]?.org_id ?? null;
         }
 
         if (!sendId) {
@@ -68,22 +71,36 @@ export async function POST(request: NextRequest) {
           continue;
         }
 
-        // ─── Update email_sends ───────────────────────────────────────────
+        // If we didn't get org_id from above lookups, fetch it now
+        if (orgId === null) {
+          const orgRow = await query<{ org_id: number }>(
+            `SELECT org_id FROM bdr.email_sends WHERE id = $1`,
+            [sendId]
+          );
+          orgId = orgRow[0]?.org_id ?? null;
+        }
+
+        if (orgId === null) {
+          console.warn('[track/replies] no org_id for send:', sendId);
+          continue;
+        }
+
+        // ─── Update email_sends (scoped to org) ──────────────────────────
         await query(
           `UPDATE bdr.email_sends
            SET replied = true,
                reply_at = COALESCE(reply_at, $2::timestamptz),
                reply_classification = 'reply'
-           WHERE id = $1 AND replied = false`,
-          [sendId, reply.replied_at || new Date().toISOString()]
+           WHERE id = $1 AND replied = false AND org_id = $3`,
+          [sendId, reply.replied_at || new Date().toISOString(), orgId]
         );
 
         // ─── Get lead data for context ────────────────────────────────────
         let leadId = reply.lead_id;
         if (!leadId) {
           const sendRow = await query<{ lead_id: number }>(
-            `SELECT lead_id FROM bdr.email_sends WHERE id = $1`,
-            [sendId]
+            `SELECT lead_id FROM bdr.email_sends WHERE id = $1 AND org_id = $2`,
+            [sendId, orgId]
           );
           leadId = sendRow[0]?.lead_id;
         }
@@ -108,8 +125,8 @@ export async function POST(request: NextRequest) {
             `SELECT lead_id, business_name, contact_name, contact_email, tier,
                     total_score, campaign_template_id, campaign_step,
                     email_subject, email_angle
-             FROM bdr.leads WHERE lead_id = $1`,
-            [leadId]
+             FROM bdr.leads WHERE lead_id = $1 AND org_id = $2`,
+            [leadId, orgId]
           );
           leadData = rows[0] || null;
         }
@@ -123,23 +140,24 @@ export async function POST(request: NextRequest) {
                  reply_date = COALESCE($2::timestamptz, NOW()),
                  reply_summary = LEFT($3, 500),
                  updated_at = NOW()
-             WHERE lead_id = $1 AND status IN ('sent', 'approved', 'email_ready')`,
-            [leadId, reply.replied_at || new Date().toISOString(), reply.snippet || '']
+             WHERE lead_id = $1 AND status IN ('sent', 'approved', 'email_ready') AND org_id = $4`,
+            [leadId, reply.replied_at || new Date().toISOString(), reply.snippet || '', orgId]
           );
         }
 
-        // ─── Insert event ─────────────────────────────────────────────────
+        // ─── Insert event (scoped to org) ───────────────────────────────
         await query(
-          `INSERT INTO bdr.email_events (lead_id, event_type, event_at, to_email, from_email, metadata)
+          `INSERT INTO bdr.email_events (lead_id, event_type, event_at, to_email, from_email, metadata, org_id)
            SELECT es.lead_id, 'reply', $2::timestamptz,
                   es.to_email, $3,
                   jsonb_build_object(
                     'send_id', $1,
                     'snippet', LEFT($4, 500),
                     'gmail_thread_id', $5
-                  )
-           FROM bdr.email_sends es WHERE es.id = $1`,
-          [sendId, reply.replied_at || new Date().toISOString(), reply.from_email || '', reply.snippet || '', reply.gmail_thread_id || '']
+                  ),
+                  es.org_id
+           FROM bdr.email_sends es WHERE es.id = $1 AND es.org_id = $6`,
+          [sendId, reply.replied_at || new Date().toISOString(), reply.from_email || '', reply.snippet || '', reply.gmail_thread_id || '', orgId]
         );
 
         // ═══════════════════════════════════════════════════════════════════
@@ -151,8 +169,9 @@ export async function POST(request: NextRequest) {
              SET status = 'skipped', updated_at = NOW()
              WHERE lead_id = $1
                AND status IN ('pending', 'scheduled', 'ready')
+               AND org_id = $2
              RETURNING id`,
-            [leadId]
+            [leadId, orgId]
           );
 
           if (pauseResult.length > 0) {
@@ -184,8 +203,8 @@ export async function POST(request: NextRequest) {
                SET reply_sentiment = $2,
                    reply_summary = $3,
                    updated_at = NOW()
-               WHERE lead_id = $1`,
-              [leadId, aiSuggestion.sentiment, aiSuggestion.summary]
+               WHERE lead_id = $1 AND org_id = $4`,
+              [leadId, aiSuggestion.sentiment, aiSuggestion.summary, orgId]
             );
           } catch (aiErr) {
             console.error(`[track/replies] AI response generation failed for lead ${leadId}:`, aiErr);
@@ -203,8 +222,8 @@ export async function POST(request: NextRequest) {
 
             // First: look for existing contact by bdr_lead_id
             const existingContact = await query<{ contact_id: number }>(
-              `SELECT contact_id FROM crm.contacts WHERE bdr_lead_id = $1::text LIMIT 1`,
-              [leadId]
+              `SELECT contact_id FROM crm.contacts WHERE bdr_lead_id = $1::text AND org_id = $2 LIMIT 1`,
+              [leadId, orgId]
             );
 
             if (existingContact.length > 0) {
@@ -213,15 +232,15 @@ export async function POST(request: NextRequest) {
               // Also try by email match
               if (leadData.contact_email) {
                 const emailContact = await query<{ contact_id: number }>(
-                  `SELECT contact_id FROM crm.contacts WHERE email = $1 LIMIT 1`,
-                  [leadData.contact_email]
+                  `SELECT contact_id FROM crm.contacts WHERE email = $1 AND org_id = $2 LIMIT 1`,
+                  [leadData.contact_email, orgId]
                 );
                 if (emailContact.length > 0) {
                   contactId = emailContact[0].contact_id;
                   // Link this contact to the BDR lead
                   await query(
-                    `UPDATE crm.contacts SET bdr_lead_id = $1::text, updated_at = NOW() WHERE contact_id = $2`,
-                    [leadId, contactId]
+                    `UPDATE crm.contacts SET bdr_lead_id = $1::text, updated_at = NOW() WHERE contact_id = $2 AND org_id = $3`,
+                    [leadId, contactId, orgId]
                   );
                 }
               }
@@ -233,10 +252,10 @@ export async function POST(request: NextRequest) {
                 const lastName = nameParts.slice(1).join(' ') || null;
 
                 const newContact = await query<{ contact_id: number }>(
-                  `INSERT INTO crm.contacts (email, first_name, last_name, business_name, lifecycle_stage, bdr_lead_id, created_at, updated_at)
-                   VALUES ($1, $2, $3, $4, 'engaged', $5::text, NOW(), NOW())
+                  `INSERT INTO crm.contacts (email, first_name, last_name, business_name, lifecycle_stage, bdr_lead_id, org_id, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, 'engaged', $5::text, $6, NOW(), NOW())
                    RETURNING contact_id`,
-                  [leadData.contact_email, firstName, lastName, leadData.business_name, leadId]
+                  [leadData.contact_email, firstName, lastName, leadData.business_name, leadId, orgId]
                 );
                 contactId = newContact[0]?.contact_id;
               }
@@ -258,13 +277,14 @@ export async function POST(request: NextRequest) {
               }
 
               const taskResult = await query<{ task_id: number }>(
-                `INSERT INTO crm.task_queue (contact_id, task_type, title, instructions, priority, status, due_at, created_at)
-                 VALUES ($1, 'email_review', $2, $3, 0, 'pending', NOW(), NOW())
+                `INSERT INTO crm.task_queue (contact_id, task_type, title, instructions, priority, status, due_at, org_id, created_at)
+                 VALUES ($1, 'email_review', $2, $3, 0, 'pending', NOW(), $4, NOW())
                  RETURNING task_id`,
                 [
                   contactId,
                   `REPLY: ${leadData.contact_name || 'Prospect'} @ ${leadData.business_name || 'Unknown'} — ${aiSuggestion?.sentiment || 'new reply'}`,
                   instructions,
+                  orgId,
                 ]
               );
 

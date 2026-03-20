@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/coaching/winloss
- * Win/Loss analysis - what worked for wins, where did losses drop off
+ * Win/Loss analysis - what worked for wins, where did losses drop off.
+ * Scoped to org_id. Contact ownership not available in CRM schema --
+ * call data is user-scoped separately in /api/coaching.
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -11,7 +14,10 @@ export async function GET(request: NextRequest) {
   const days = period === '7d' ? 7 : period === '30d' ? 30 : 90;
 
   try {
-    // Won deals analysis
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
+    // Won deals analysis (org-scoped)
     const wonDeals = await query<{
       contact_id: number;
       contact_name: string;
@@ -36,11 +42,12 @@ export async function GET(request: NextRequest) {
       FROM crm.contacts c
       WHERE c.lifecycle_stage = 'won'
         AND c.updated_at >= NOW() - INTERVAL '1 day' * $1
+        AND c.org_id = $2
       ORDER BY c.updated_at DESC
       LIMIT 20
-    `, [days]);
+    `, [days, orgId]);
 
-    // Lost deals analysis
+    // Lost deals analysis (user-scoped via deal owner)
     const lostDeals = await query<{
       contact_id: number;
       contact_name: string;
@@ -65,11 +72,12 @@ export async function GET(request: NextRequest) {
       FROM crm.contacts c
       WHERE c.lifecycle_stage = 'lost'
         AND c.updated_at >= NOW() - INTERVAL '1 day' * $1
+        AND c.org_id = $2
       ORDER BY c.updated_at DESC
       LIMIT 20
-    `, [days]);
+    `, [days, orgId]);
 
-    // Win patterns summary
+    // Win patterns summary (org-scoped)
     const winPatterns = await query<{
       avg_touches: string;
       avg_days: string;
@@ -89,11 +97,12 @@ export async function GET(request: NextRequest) {
           (SELECT channel FROM crm.touchpoints t WHERE t.contact_id = c.contact_id ORDER BY occurred_at ASC LIMIT 1) as first_channel
         FROM crm.contacts c
         WHERE c.lifecycle_stage = 'won'
+          AND c.org_id = $1
       ) sub
       WHERE sub.touches > 0
-    `);
+    `, [orgId]);
 
-    // Loss patterns summary
+    // Loss patterns summary (org-scoped)
     const lossPatterns = await query<{
       avg_touches: string;
       avg_days: string;
@@ -113,11 +122,12 @@ export async function GET(request: NextRequest) {
           (SELECT event_type FROM crm.touchpoints t WHERE t.contact_id = c.contact_id ORDER BY occurred_at DESC LIMIT 1) as last_event
         FROM crm.contacts c
         WHERE c.lifecycle_stage = 'lost'
+          AND c.org_id = $1
       ) sub
       WHERE sub.touches > 0
-    `);
+    `, [orgId]);
 
-    // Channel effectiveness comparison: win rate by first-touch channel
+    // Channel effectiveness comparison: win rate by first-touch channel (org-scoped)
     const channelWinRate = await query<{
       channel: string;
       total: string;
@@ -140,11 +150,12 @@ export async function GET(request: NextRequest) {
           (SELECT channel FROM crm.touchpoints t WHERE t.contact_id = c.contact_id ORDER BY occurred_at ASC LIMIT 1) as first_channel
         FROM crm.contacts c
         WHERE c.lifecycle_stage IN ('won', 'lost')
+          AND c.org_id = $1
       ) sub
       WHERE sub.first_channel IS NOT NULL
       GROUP BY sub.first_channel
       ORDER BY COUNT(CASE WHEN sub.stage = 'won' THEN 1 END) DESC
-    `);
+    `, [orgId]);
 
     return NextResponse.json({
       wonDeals,

@@ -1,11 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Loader2, Search, Archive, CheckSquare, Square, X, SlidersHorizontal, ArrowUpDown, BarChart3, List } from 'lucide-react';
+import { Loader2, Search, Archive, CheckSquare, Square, X, SlidersHorizontal, ArrowUpDown, BarChart3, List, Inbox, RefreshCw } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 import { useRouter } from 'next/navigation';
 import DealCard from '@/components/followups/DealCard';
 import FollowUpAnalytics from '@/components/followups/FollowUpAnalytics';
+import FollowUpQueue from '@/components/followups/FollowUpQueue';
+
+type Tab = 'queue' | 'deals' | 'analytics';
 
 interface Deal {
   deal_id: string;
@@ -45,7 +48,8 @@ export default function FollowUpsPage() {
   const [showFilters, setShowFilters] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkArchiving, setBulkArchiving] = useState(false);
-  const [tab, setTab] = useState<'deals' | 'analytics'>('deals');
+  const [tab, setTab] = useState<Tab>('queue');
+  const [syncing, setSyncing] = useState(false);
 
   const activeFilterCount = [stage, status, urgency, touchProgress].filter(Boolean).length;
 
@@ -71,8 +75,36 @@ export default function FollowUpsPage() {
   }, [stage, search, status, urgency, touchProgress, sortBy]);
 
   useEffect(() => {
-    fetchDeals();
-  }, [fetchDeals]);
+    if (tab === 'deals') {
+      fetchDeals();
+    }
+  }, [fetchDeals, tab]);
+
+  const handleSyncAndCreate = async () => {
+    setSyncing(true);
+    const toastId = addToast('Syncing Fathom calls & creating deals...', 'loading');
+    try {
+      const res = await fetch('/api/calls/sync', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        const newDeals = data.deals?.created || 0;
+        const campaigns = data.deals?.campaigns_generated || 0;
+        updateToast(toastId,
+          `Synced ${data.inserted || 0} calls` +
+          (newDeals > 0 ? `, ${newDeals} new deals` : '') +
+          (campaigns > 0 ? `, ${campaigns} campaigns generated` : ''),
+          'success'
+        );
+        if (tab === 'deals') fetchDeals();
+      } else {
+        updateToast(toastId, 'Sync failed', 'error');
+      }
+    } catch {
+      updateToast(toastId, 'Sync failed — network error', 'error');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleGenerate = async (dealId: string) => {
     const toastId = addToast('Generating campaign...', 'loading');
@@ -164,9 +196,19 @@ export default function FollowUpsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Follow-Ups</h1>
-          <p className="text-sm text-gray-400 mt-1">Post-demo pipeline and AI-generated follow-up campaigns</p>
+          <p className="text-sm text-gray-400 mt-1">Post-demo pipeline — Fathom calls auto-create deals with campaigns ready for approval</p>
         </div>
         <div className="flex items-center gap-3">
+          {/* Sync button — always visible */}
+          <button
+            onClick={handleSyncAndCreate}
+            disabled={syncing}
+            className="flex items-center gap-1.5 bg-purple-600/20 hover:bg-purple-600/30 border border-purple-600/30 disabled:opacity-50 text-purple-400 text-xs px-3 py-1.5 rounded-lg transition-colors"
+          >
+            {syncing ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Sync Fathom
+          </button>
+
           {tab === 'deals' && !loading && deals.length > 0 && (
             <div className="flex items-center gap-3 text-xs text-gray-500 mr-3">
               <span>{noCampaign} no campaign</span>
@@ -174,7 +216,17 @@ export default function FollowUpsPage() {
               <span className="text-green-400">{completedCampaigns} complete</span>
             </div>
           )}
+
+          {/* Tab switcher */}
           <div className="flex items-center bg-gray-800 rounded-lg p-0.5">
+            <button
+              onClick={() => setTab('queue')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
+                tab === 'queue' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Inbox className="w-3.5 h-3.5" /> Queue
+            </button>
             <button
               onClick={() => setTab('deals')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
@@ -195,8 +247,13 @@ export default function FollowUpsPage() {
         </div>
       </div>
 
+      {/* Queue Tab */}
+      {tab === 'queue' && <FollowUpQueue />}
+
+      {/* Analytics Tab */}
       {tab === 'analytics' && <FollowUpAnalytics />}
 
+      {/* Deals Tab */}
       {tab === 'deals' && <>
       {/* Filters row */}
       <div className="flex flex-wrap items-center gap-2">
@@ -362,8 +419,11 @@ export default function FollowUpsPage() {
           <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
         </div>
       ) : deals.length === 0 ? (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center space-y-3">
           <p className="text-gray-500">No deals found</p>
+          <p className="text-xs text-gray-600">
+            Click "Sync Fathom" to pull your recent calls and auto-create deals with campaigns
+          </p>
           {activeFilterCount > 0 && (
             <button onClick={clearFilters} className="text-xs text-blue-400 hover:text-blue-300 mt-2">
               Clear filters

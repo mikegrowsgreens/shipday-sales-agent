@@ -1,15 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryShipdayOne, queryShipday } from '@/lib/db';
+import { queryDealsOne, queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 import { generateFollowUpCampaign } from '@/lib/ai';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
 
 /**
  * POST /api/followups/generate
  * Generate an adaptive follow-up campaign for a deal via Claude AI.
  * Touch count adapts based on: next call date, demo recency, or pipeline stage.
- * Saves drafts to shipday.email_drafts.
+ * Saves drafts to the deals DB email_drafts table.
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { deal_id, additional_context, next_call_date } = body as {
       deal_id: string;
@@ -22,7 +31,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Load deal context
-    const deal = await queryShipdayOne<{
+    const deal = await queryDealsOne<{
       deal_id: string;
       contact_name: string;
       contact_email: string;
@@ -36,7 +45,7 @@ export async function POST(request: NextRequest) {
     }>(
       `SELECT deal_id, contact_name, contact_email, business_name, pipeline_stage,
               pain_points, fathom_summary, action_items, next_touch_due, demo_date
-       FROM shipday.deals WHERE deal_id = $1`,
+       FROM deals.deals WHERE deal_id = $1`,
       [deal_id],
     );
 
@@ -99,8 +108,8 @@ export async function POST(request: NextRequest) {
 
       // Save the next call date to the deal if provided via request
       if (next_call_date) {
-        await queryShipday(
-          `UPDATE shipday.deals SET next_touch_due = $1, updated_at = NOW() WHERE deal_id = $2`,
+        await queryDeals(
+          `UPDATE deals.deals SET next_touch_due = $1, updated_at = NOW() WHERE deal_id = $2`,
           [next_call_date, deal_id],
         );
       }
@@ -138,13 +147,14 @@ export async function POST(request: NextRequest) {
     let emailHistory = '';
     if (deal.contact_email) {
       try {
-        const n8nBase = process.env.N8N_BASE_URL || 'https://automation.mikegrowsgreens.com';
+        const n8nBase = process.env.N8N_BASE_URL || '';
         const emailContextWorkflowId = process.env.N8N_EMAIL_CONTEXT_WORKFLOW_ID || 'VG0KpWu437gYmVJS';
         const webhookUrl = `${n8nBase}/webhook/${emailContextWorkflowId}/webhook/email-context`;
-        const emailResp = await fetch(webhookUrl, {
+        const emailResp = await fetchWithTimeout(webhookUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: deal.contact_email }),
+          timeout: 30000,
         });
         if (emailResp.ok) {
           const emailData = await emailResp.json();
@@ -179,8 +189,8 @@ export async function POST(request: NextRequest) {
     });
 
     // Delete existing drafts for this deal (regeneration)
-    await queryShipday(
-      `DELETE FROM shipday.email_drafts WHERE deal_id = $1`,
+    await queryDeals(
+      `DELETE FROM deals.email_drafts WHERE deal_id = $1`,
       [deal_id],
     );
 
@@ -191,8 +201,8 @@ export async function POST(request: NextRequest) {
       sendDate.setDate(sendDate.getDate() + dayOffset);
       sendDate.setHours(9, 0, 0, 0); // Default 9 AM send time
 
-      await queryShipday(
-        `INSERT INTO shipday.email_drafts (deal_id, touch_number, subject, body_plain, suggested_send_time, status, created_at, updated_at)
+      await queryDeals(
+        `INSERT INTO deals.email_drafts (deal_id, touch_number, subject, body_plain, suggested_send_time, status, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, 'draft', NOW(), NOW())`,
         [deal_id, draft.touch_number, draft.subject, draft.body, sendDate.toISOString()],
       );
@@ -202,28 +212,28 @@ export async function POST(request: NextRequest) {
     for (let i = 0; i < Math.min(touchDaySpacing.length, 7); i++) {
       const field = i === 0 ? 'touch1_sent_at' : `touch${i + 1}_scheduled_at`;
       if (i === 0) continue;
-      await queryShipday(
-        `UPDATE shipday.deals SET ${field} = NOW() + interval '${touchDaySpacing[i]} days', updated_at = NOW() WHERE deal_id = $1`,
+      await queryDeals(
+        `UPDATE deals.deals SET ${field} = NOW() + interval '${touchDaySpacing[i]} days', updated_at = NOW() WHERE deal_id = $1`,
         [deal_id],
       );
     }
 
     // Log activity
-    await queryShipday(
-      `INSERT INTO shipday.activity_log (deal_id, action_type, notes, created_at)
+    await queryDeals(
+      `INSERT INTO deals.activity_log (deal_id, action_type, notes, created_at)
        VALUES ($1, 'campaign_generated', $2, NOW())`,
       [deal_id, JSON.stringify({ touch_count: drafts.length })],
     );
 
     // Update deal agent_status to active
-    await queryShipday(
-      `UPDATE shipday.deals SET agent_status = 'active', updated_at = NOW() WHERE deal_id = $1`,
+    await queryDeals(
+      `UPDATE deals.deals SET agent_status = 'active', updated_at = NOW() WHERE deal_id = $1`,
       [deal_id],
     );
 
     // Reload saved drafts
-    const savedDrafts = await queryShipday(
-      `SELECT * FROM shipday.email_drafts WHERE deal_id = $1 ORDER BY touch_number ASC`,
+    const savedDrafts = await queryDeals(
+      `SELECT * FROM deals.email_drafts WHERE deal_id = $1 ORDER BY touch_number ASC`,
       [deal_id],
     );
 

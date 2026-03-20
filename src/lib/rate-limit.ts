@@ -22,13 +22,50 @@ export const trackLimiter = new RateLimiterMemory({
   keyPrefix: 'track',
 });
 
+// AI generation endpoints: 20 requests per minute per IP (cost protection)
+export const aiLimiter = new RateLimiterMemory({
+  points: 20,
+  duration: 60,
+  keyPrefix: 'ai',
+});
+
+// Import/bulk endpoints: 10 requests per minute per IP (abuse prevention)
+export const importLimiter = new RateLimiterMemory({
+  points: 10,
+  duration: 60,
+  keyPrefix: 'import',
+});
+
+// Public scheduling slots: 60 requests per minute per IP
+export const slotsLimiter = new RateLimiterMemory({
+  points: 60,
+  duration: 60,
+  keyPrefix: 'slots',
+});
+
+// Public booking/cancel: 10 requests per hour per IP (abuse prevention)
+export const bookingLimiter = new RateLimiterMemory({
+  points: 10,
+  duration: 3600,
+  keyPrefix: 'booking',
+});
+
 /**
  * Check rate limit for a given IP. Returns NextResponse 429 if exceeded, null if OK.
+ * Internal calls with a valid X-Internal-Key header bypass rate limiting.
  */
 export async function checkRateLimit(
   limiter: RateLimiterMemory,
-  ip: string
+  ip: string,
+  request?: Request,
 ): Promise<NextResponse | null> {
+  // Bypass rate limiting for internal service calls (voice agent, etc.)
+  if (request) {
+    const internalKey = request.headers.get('x-internal-key');
+    if (internalKey && process.env.INTERNAL_API_KEY && internalKey === process.env.INTERNAL_API_KEY) {
+      return null;
+    }
+  }
   try {
     await limiter.consume(ip);
     return null;

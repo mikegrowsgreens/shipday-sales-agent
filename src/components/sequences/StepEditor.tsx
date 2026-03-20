@@ -282,7 +282,7 @@ function LinkedInEditor({ step, onUpdate }: { step: FlowStep; onUpdate: (u: Part
         <textarea
           value={step.bodyTemplate}
           onChange={(e) => onUpdate({ bodyTemplate: e.target.value })}
-          placeholder="Hey {{first_name}}, noticed we're both in the restaurant delivery space..."
+          placeholder="Hey {{first_name}}, noticed we're both in the {{company}} space..."
           rows={6}
           className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:border-blue-500 resize-none"
         />
@@ -313,7 +313,7 @@ function SmsEditor({ step, onUpdate }: { step: FlowStep; onUpdate: (u: Partial<F
         <textarea
           value={step.bodyTemplate}
           onChange={(e) => onUpdate({ bodyTemplate: e.target.value })}
-          placeholder="Hey {{first_name}}, this is Mike from Shipday. Quick question about your delivery ops..."
+          placeholder="Hey {{first_name}}, quick question about {{business_name}}..."
           rows={4}
           className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:border-blue-500 resize-none"
         />

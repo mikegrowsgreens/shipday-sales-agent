@@ -115,6 +115,7 @@ export default function SettingsPage() {
 
   // Profile form
   const [orgName, setOrgName] = useState('');
+  const [orgSlug, setOrgSlug] = useState('');
   const [orgDomain, setOrgDomain] = useState('');
   const [orgLogo, setOrgLogo] = useState('');
 
@@ -179,6 +180,7 @@ export default function SettingsPage() {
         const data = await res.json();
         setOrg(data);
         setOrgName(data.name || '');
+        setOrgSlug(data.slug || '');
         setOrgDomain(data.domain || '');
         setOrgLogo(data.logo_url || '');
       }
@@ -275,7 +277,7 @@ export default function SettingsPage() {
     await fetch('/api/admin/org', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: orgName, domain: orgDomain, logo_url: orgLogo }),
+      body: JSON.stringify({ name: orgName, slug: orgSlug, domain: orgDomain, logo_url: orgLogo }),
     });
     setSaving(false);
     showSaved();
@@ -546,6 +548,18 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
+                <label className="block text-sm text-gray-400 mb-1">Booking Slug</label>
+                <input
+                  value={orgSlug}
+                  onChange={e => setOrgSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white font-mono"
+                  placeholder="your-company"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Booking page: saleshub.mikegrowsgreens.com/book/{orgSlug || 'your-slug'}
+                </p>
+              </div>
+              <div>
                 <label className="block text-sm text-gray-400 mb-1">Domain</label>
                 <input
                   value={orgDomain}
@@ -554,7 +568,7 @@ export default function SettingsPage() {
                   placeholder="company.com"
                 />
               </div>
-              <div className="md:col-span-2">
+              <div>
                 <label className="block text-sm text-gray-400 mb-1">Logo URL</label>
                 <input
                   value={orgLogo}
@@ -565,11 +579,7 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
-              <div className="bg-gray-800 rounded-lg p-3">
-                <p className="text-xs text-gray-500">Slug</p>
-                <p className="text-sm text-white font-mono">{org?.slug || '—'}</p>
-              </div>
+            <div className="grid grid-cols-3 gap-4 mt-4">
               <div className="bg-gray-800 rounded-lg p-3">
                 <p className="text-xs text-gray-500">Plan</p>
                 <p className="text-sm text-white capitalize">{org?.plan || 'pro'}</p>
@@ -621,11 +631,11 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">From Name</label>
-                  <input value={smtp.from_name} onChange={e => setSmtp(s => ({ ...s, from_name: e.target.value }))} className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" placeholder="Mike Paulus" />
+                  <input value={smtp.from_name} onChange={e => setSmtp(s => ({ ...s, from_name: e.target.value }))} className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" placeholder="Your Name" />
                 </div>
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">From Email</label>
-                  <input value={smtp.from_email} onChange={e => setSmtp(s => ({ ...s, from_email: e.target.value }))} className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" placeholder="mike@shipday.com" />
+                  <input value={smtp.from_email} onChange={e => setSmtp(s => ({ ...s, from_email: e.target.value }))} className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" placeholder="you@company.com" />
                 </div>
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">Encryption</label>
@@ -761,7 +771,7 @@ export default function SettingsPage() {
                             value={wh.url}
                             onChange={e => updateWebhook(wh.id, 'url', e.target.value)}
                             className="px-3 py-1.5 bg-gray-700 border border-gray-600 rounded text-white text-sm md:col-span-2"
-                            placeholder="https://automation.mikegrowsgreens.com/webhook/..."
+                            placeholder="https://automation.example.com/webhook/..."
                           />
                         </div>
 

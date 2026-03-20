@@ -267,8 +267,8 @@ export default function DashboardPage() {
         </h2>
         <div className="grid grid-cols-3 gap-3">
           <StatCard label="Emails Sent" value={stats.emails_sent} icon={Mail} />
-          <StatCard label="Open Rate" value={stats.emails_sent > 0 ? stats.open_rate.toFixed(1) : '—'} suffix={stats.emails_sent > 0 ? '%' : undefined} icon={MousePointerClick} />
-          <StatCard label="Reply Rate" value={stats.emails_sent > 0 ? stats.reply_rate.toFixed(1) : '—'} suffix={stats.emails_sent > 0 ? '%' : undefined} icon={MessageSquare} />
+          <StatCard label="Open Rate" value={stats.emails_sent > 0 ? stats.open_rate.toFixed(1) : '0'} suffix={stats.emails_sent > 0 ? '%' : undefined} icon={MousePointerClick} />
+          <StatCard label="Reply Rate" value={stats.emails_sent > 0 ? stats.reply_rate.toFixed(1) : '0'} suffix={stats.emails_sent > 0 ? '%' : undefined} icon={MessageSquare} />
         </div>
       </div>
 
@@ -284,8 +284,8 @@ export default function DashboardPage() {
             <StatCard label="Leads" value={bdr.total_leads} icon={Target} />
             <StatCard label="Emails Sent" value={bdr.sent} icon={Send} />
             <StatCard label="Total Opens" value={bdr.total_opens} icon={Eye} color={bdr.total_opens > 0 ? 'text-cyan-400' : 'text-white'} />
-            <StatCard label="Open Rate" value={bdr.sent > 0 ? bdr.open_rate.toFixed(1) : '—'} suffix={bdr.sent > 0 ? '%' : undefined} icon={MousePointerClick} />
-            <StatCard label="Reply Rate" value={bdr.sent > 0 ? bdr.reply_rate.toFixed(1) : '—'} suffix={bdr.sent > 0 ? '%' : undefined} icon={MessageSquare} />
+            <StatCard label="Open Rate" value={bdr.sent > 0 ? bdr.open_rate.toFixed(1) : '0'} suffix={bdr.sent > 0 ? '%' : undefined} icon={MousePointerClick} />
+            <StatCard label="Reply Rate" value={bdr.sent > 0 ? bdr.reply_rate.toFixed(1) : '0'} suffix={bdr.sent > 0 ? '%' : undefined} icon={MessageSquare} />
             <StatCard label="Ready to Send" value={bdr.email_ready} icon={Mail} color={bdr.email_ready > 0 ? 'text-blue-400' : 'text-white'} />
             <StatCard label="Demo Stage" value={bdr.demo_opps} icon={Calendar} color={bdr.demo_opps > 0 ? 'text-green-400' : 'text-white'} />
           </div>
@@ -300,7 +300,7 @@ export default function DashboardPage() {
             <StatCard label="Active Deals" value={postDemo.active_deals} icon={Briefcase} color={postDemo.active_deals > 0 ? 'text-purple-400' : 'text-white'} />
             <StatCard label="Drafts Pending" value={postDemo.drafts_pending} icon={FileText} color={postDemo.drafts_pending > 0 ? 'text-yellow-400' : 'text-white'} />
             <StatCard label="Follow-Ups Sent" value={postDemo.followups_sent} icon={Mail} />
-            <StatCard label="Response Rate" value={postDemo.followups_sent > 0 ? postDemo.response_rate.toFixed(1) : '—'} suffix={postDemo.followups_sent > 0 ? '%' : undefined} icon={TrendingUp} />
+            <StatCard label="Response Rate" value={postDemo.followups_sent > 0 ? postDemo.response_rate.toFixed(1) : '0'} suffix={postDemo.followups_sent > 0 ? '%' : undefined} icon={TrendingUp} />
           </div>
         </div>
       </div>

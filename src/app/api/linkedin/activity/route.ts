@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/linkedin/activity
@@ -11,6 +12,9 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const { searchParams } = new URL(request.url);
     const days = Math.min(parseInt(searchParams.get('days') || '30'), 90);
     const actionType = searchParams.get('action_type') || '';
@@ -20,9 +24,10 @@ export async function GET(request: NextRequest) {
                  c.first_name, c.last_name, c.email, c.business_name, c.linkedin_url
                FROM crm.linkedin_activity la
                JOIN crm.contacts c ON c.contact_id = la.contact_id
-               WHERE la.executed_at > NOW() - INTERVAL '1 day' * $1`;
-    const params: unknown[] = [days];
-    let pi = 2;
+               WHERE la.executed_at > NOW() - INTERVAL '1 day' * $1
+                 AND c.org_id = $2`;
+    const params: unknown[] = [days, orgId];
+    let pi = 3;
 
     if (actionType) {
       sql += ` AND la.action_type = $${pi}`;
@@ -50,10 +55,12 @@ export async function GET(request: NextRequest) {
          COUNT(*) FILTER (WHERE status = 'sent')::text as sent,
          COUNT(*) FILTER (WHERE status = 'accepted')::text as accepted,
          COUNT(*) FILTER (WHERE status = 'failed')::text as failed
-       FROM crm.linkedin_activity
-       WHERE executed_at > NOW() - INTERVAL '1 day' * $1
-       GROUP BY action_type`,
-      [days]
+       FROM crm.linkedin_activity la
+       JOIN crm.contacts c ON c.contact_id = la.contact_id
+       WHERE la.executed_at > NOW() - INTERVAL '1 day' * $1
+         AND c.org_id = $2
+       GROUP BY la.action_type`,
+      [days, orgId]
     );
 
     return NextResponse.json({

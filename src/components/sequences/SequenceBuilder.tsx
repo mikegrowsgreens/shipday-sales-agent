@@ -8,6 +8,7 @@ import {
   Sparkles, RefreshCw, Wand2, ChevronDown, ChevronRight,
   ArrowUp, ArrowDown, Clock, Tag, Copy,
 } from 'lucide-react';
+import TestSendButton from '@/components/ui/TestSendButton';
 
 interface Step {
   step_type: string;
@@ -682,6 +683,24 @@ export default function SequenceBuilder({
                             <RefreshCw className="w-3.5 h-3.5" />
                           )}
                         </button>
+                        {step.step_type === 'email' && step.subject_template && (
+                          <TestSendButton
+                            onSend={async (email) => {
+                              const res = await fetch('/api/sequences/test-send', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                  subject: step.subject_template,
+                                  body: step.body_template,
+                                  recipient_email: email,
+                                }),
+                              });
+                              if (!res.ok) throw new Error('Test send failed');
+                            }}
+                            size="sm"
+                            disabled={!step.subject_template || !step.body_template}
+                          />
+                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); duplicateStep(index); }}
                           className="p-1 text-gray-600 hover:text-gray-300 transition-colors"

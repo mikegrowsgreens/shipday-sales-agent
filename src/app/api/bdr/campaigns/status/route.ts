@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
 
 /**
  * POST /api/bdr/campaigns/status
@@ -10,13 +12,17 @@ import { query } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'campaigns');
+
     const { lead_ids } = await request.json();
 
     if (!lead_ids || !Array.isArray(lead_ids) || lead_ids.length === 0) {
       return NextResponse.json({ campaigns: {} });
     }
 
-    const placeholders = lead_ids.map((_: number, i: number) => `$${i + 1}`).join(',');
     const rows = await query<{
       id: number;
       lead_id: number;
@@ -35,9 +41,9 @@ export async function POST(request: NextRequest) {
       `SELECT id, lead_id, template_id, step_number, channel, delay_days,
               angle, tone, subject, body, status, scheduled_at, sent_at
        FROM bdr.campaign_emails
-       WHERE lead_id IN (${placeholders})
+       WHERE lead_id = ANY($1) AND org_id = $2
        ORDER BY lead_id, step_number`,
-      lead_ids
+      [lead_ids, tenant.org_id]
     );
 
     // Group by lead_id
@@ -49,6 +55,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ campaigns });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[campaign-status] error:', error);
     return NextResponse.json({ error: 'Failed to fetch campaign status' }, { status: 500 });
   }

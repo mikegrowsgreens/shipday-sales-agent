@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 
 /**
  * POST /api/twilio/sms - Send an SMS via Twilio
@@ -7,6 +9,9 @@ import { query, queryOne } from '@/lib/db';
  * Body: { contact_id, body, task_id? }
  */
 export async function POST(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
+
   const reqBody = await request.json();
   const { contact_id, body: smsBody, task_id } = reqBody;
 
@@ -20,8 +25,8 @@ export async function POST(request: NextRequest) {
     first_name: string | null;
     business_name: string | null;
   }>(
-    `SELECT contact_id, phone, first_name, business_name FROM crm.contacts WHERE contact_id = $1`,
-    [contact_id]
+    `SELECT contact_id, phone, first_name, business_name FROM crm.contacts WHERE contact_id = $1 AND org_id = $2`,
+    [contact_id, orgId]
   );
 
   if (!contact?.phone) {
@@ -43,7 +48,7 @@ export async function POST(request: NextRequest) {
       Body: smsBody,
     });
 
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Messages.json`,
       {
         method: 'POST',
@@ -52,6 +57,7 @@ export async function POST(request: NextRequest) {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: msgParams.toString(),
+        timeout: 30000,
       }
     );
 
@@ -64,17 +70,18 @@ export async function POST(request: NextRequest) {
 
     // Record in sms_messages table
     await query(
-      `INSERT INTO crm.sms_messages (contact_id, direction, from_number, to_number, body, twilio_sid, status)
-       VALUES ($1, 'outbound', $2, $3, $4, $5, $6)`,
-      [contact_id, twilioFrom, contact.phone, smsBody, msgData.sid, msgData.status]
+      `INSERT INTO crm.sms_messages (contact_id, org_id, direction, from_number, to_number, body, twilio_sid, status)
+       VALUES ($1, $2, 'outbound', $3, $4, $5, $6, $7)`,
+      [contact_id, orgId, twilioFrom, contact.phone, smsBody, msgData.sid, msgData.status]
     );
 
     // Log touchpoint
     await query(
-      `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, body_preview, metadata, occurred_at)
-       VALUES ($1, 'sms', 'sent', 'outbound', 'saleshub', $2, $3, NOW())`,
+      `INSERT INTO crm.touchpoints (contact_id, org_id, channel, event_type, direction, source_system, body_preview, metadata, occurred_at)
+       VALUES ($1, $2, 'sms', 'sent', 'outbound', 'saleshub', $3, $4, NOW())`,
       [
         contact_id,
+        orgId,
         smsBody.substring(0, 200),
         JSON.stringify({ twilio_sid: msgData.sid, task_id }),
       ]

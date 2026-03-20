@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { Contact } from '@/lib/types';
+import { withAuth } from '@/lib/route-auth';
+import { getOrgPlan, requireResourceLimit } from '@/lib/feature-gate';
+import { logAuditEvent } from '@/lib/audit';
+import { trackUsage } from '@/lib/usage';
+import { createContactSchema } from '@/lib/validators/contacts';
 
 // GET /api/contacts - List contacts with filters
-export async function GET(request: NextRequest) {
+export const GET = withAuth(async (request, { orgId }) => {
   try {
     const { searchParams } = request.nextUrl;
     const stage = searchParams.get('stage');
@@ -13,9 +18,9 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '50');
     const offset = parseInt(searchParams.get('offset') || '0');
 
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    let paramIdx = 1;
+    const conditions: string[] = ['org_id = $1'];
+    const params: unknown[] = [orgId];
+    let paramIdx = 2;
 
     if (stage && stage !== 'all') {
       conditions.push(`lifecycle_stage = $${paramIdx++}`);
@@ -34,7 +39,7 @@ export async function GET(request: NextRequest) {
       paramIdx++;
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where = `WHERE ${conditions.join(' AND ')}`;
     const allowedSorts = ['updated_at', 'created_at', 'lead_score', 'engagement_score', 'business_name'];
     const sortCol = allowedSorts.includes(sort) ? sort : 'updated_at';
     const sortOrder = order === 'ASC' ? 'ASC' : 'DESC';
@@ -61,23 +66,30 @@ export async function GET(request: NextRequest) {
     console.error('[contacts] GET error:', error);
     return NextResponse.json({ error: 'Failed to load contacts' }, { status: 500 });
   }
-}
+});
 
 // POST /api/contacts - Create a new contact
-export async function POST(request: NextRequest) {
+export const POST = withAuth(async (request, { tenant, orgId }) => {
   try {
+    const plan = await getOrgPlan(orgId);
+    await requireResourceLimit(orgId, plan, 'maxContacts', 'crm.contacts');
+
     const body = await request.json();
+    const parsed = createContactSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
+    }
     const {
       email, phone, first_name, last_name, business_name,
       title, linkedin_url, website, lifecycle_stage, tags, metadata,
-    } = body;
+    } = parsed.data;
 
     const contact = await queryOne<Contact>(
       `INSERT INTO crm.contacts (
-        email, phone, first_name, last_name, business_name,
+        org_id, email, phone, first_name, last_name, business_name,
         title, linkedin_url, website, lifecycle_stage, tags, metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      ON CONFLICT (email) DO UPDATE SET
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      ON CONFLICT (email) WHERE org_id = $1 DO UPDATE SET
         phone = COALESCE(EXCLUDED.phone, crm.contacts.phone),
         first_name = COALESCE(EXCLUDED.first_name, crm.contacts.first_name),
         last_name = COALESCE(EXCLUDED.last_name, crm.contacts.last_name),
@@ -88,15 +100,30 @@ export async function POST(request: NextRequest) {
         updated_at = NOW()
       RETURNING *`,
       [
-        email, phone, first_name, last_name, business_name,
+        orgId, email, phone, first_name, last_name, business_name,
         title, linkedin_url, website, lifecycle_stage || 'raw',
         tags || [], metadata || {},
       ]
     );
 
+    logAuditEvent({
+      orgId: tenant.org_id,
+      userId: tenant.user_id,
+      action: 'contact.create',
+      resourceType: 'contact',
+      resourceId: String(contact?.contact_id),
+      details: { email, first_name, last_name, business_name },
+      request,
+    });
+
+    trackUsage(orgId, 'contacts_created');
+
     return NextResponse.json(contact, { status: 201 });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[contacts] POST error:', error);
     return NextResponse.json({ error: 'Failed to create contact' }, { status: 500 });
   }
-}
+});

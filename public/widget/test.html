@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SalesHub Widget Test Page</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 40px 20px;
+      color: #333;
+    }
+    h1 { color: #1e40af; margin-bottom: 8px; }
+    p { color: #6b7280; line-height: 1.6; }
+    .card {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 24px;
+      margin: 24px 0;
+    }
+    code {
+      background: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    pre {
+      background: #1e293b;
+      color: #e2e8f0;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h1>SalesHub Chat Widget - Test Page</h1>
+  <p>This page demonstrates the embeddable chat widget. Look for the chat bubble in the bottom-right corner.</p>
+
+  <div class="card">
+    <h3>How to embed on your site</h3>
+    <p>Add this single script tag before the closing <code>&lt;/body&gt;</code> tag:</p>
+    <pre>&lt;script
+  src="https://your-saleshub.com/widget/embed.js"
+  data-org-slug="your-org"
+  data-accent-color="#2563eb"
+  data-position="bottom-right"
+  data-greeting="Hi! How can I help?"
+&gt;&lt;/script&gt;</pre>
+  </div>
+
+  <div class="card">
+    <h3>Configuration Options</h3>
+    <p><code>data-org-slug</code> — Your organization slug (required)</p>
+    <p><code>data-accent-color</code> — Hex color for the widget theme (default: #2563eb)</p>
+    <p><code>data-position</code> — "bottom-right" or "bottom-left" (default: bottom-right)</p>
+    <p><code>data-greeting</code> — Custom greeting message</p>
+    <p><code>data-api-base</code> — API base URL (auto-detected from script src)</p>
+  </div>
+
+  <div class="card">
+    <h3>Iframe Fallback</h3>
+    <p>For sites that can't use script tags, use the iframe embed:</p>
+    <pre>&lt;iframe
+  src="https://your-saleshub.com/widget/embed/your-org"
+  style="position:fixed; bottom:0; right:0;
+         width:400px; height:600px;
+         border:none; z-index:999999;"
+  allow="clipboard-write"
+&gt;&lt;/iframe&gt;</pre>
+  </div>
+
+  <div class="card">
+    <h3>Features</h3>
+    <ul style="padding-left: 20px; line-height: 2;">
+      <li>Shadow DOM — no CSS conflicts with your site</li>
+      <li>Session persistence via localStorage (24h expiry)</li>
+      <li>Mobile-responsive — full-screen on mobile, widget on desktop</li>
+      <li>Visitor tracking — captures page URL, referrer, UTM params</li>
+      <li>Smooth open/close animations</li>
+      <li>Suggested prompts after each response</li>
+      <li>Auto-detects API base URL from script source</li>
+    </ul>
+  </div>
+
+  <!-- Widget embed -->
+  <script
+    src="./embed.js"
+    data-org-slug="demo"
+    data-accent-color="#2563eb"
+    data-position="bottom-right"
+    data-greeting="Hi there! I'm here to help you explore how our platform can drive growth for your business."
+    data-api-base=""
+  ></script>
+</body>
+</html>

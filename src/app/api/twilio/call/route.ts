@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { TRACKING_BASE_URL } from '@/lib/config';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/twilio/call - Initiate a Twilio click-to-call
@@ -10,6 +13,9 @@ import { query, queryOne } from '@/lib/db';
  * Body: { contact_id, task_id? }
  */
 export async function POST(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
+
   const body = await request.json();
   const { contact_id, task_id } = body;
 
@@ -25,8 +31,8 @@ export async function POST(request: NextRequest) {
     first_name: string | null;
     business_name: string | null;
   }>(
-    `SELECT contact_id, phone, email, first_name, business_name FROM crm.contacts WHERE contact_id = $1`,
-    [contact_id]
+    `SELECT contact_id, phone, email, first_name, business_name FROM crm.contacts WHERE contact_id = $1 AND org_id = $2`,
+    [contact_id, orgId]
   );
 
   if (!contact?.phone) {
@@ -36,8 +42,8 @@ export async function POST(request: NextRequest) {
   const twilioSid = process.env.TWILIO_ACCOUNT_SID;
   const twilioAuth = process.env.TWILIO_AUTH_TOKEN;
   const twilioFrom = process.env.TWILIO_PHONE_NUMBER;
-  const mikePhone = process.env.TWILIO_MIKE_PHONE;
-  const statusCallback = process.env.TWILIO_STATUS_CALLBACK_URL || 'https://saleshub.mikegrowsgreens.com/api/twilio/status';
+  const repPhone = process.env.TWILIO_REP_PHONE;
+  const statusCallback = process.env.TWILIO_STATUS_CALLBACK_URL || `${TRACKING_BASE_URL}/api/twilio/status`;
 
   if (!twilioSid || !twilioAuth || !twilioFrom) {
     return NextResponse.json({ error: 'Twilio not configured' }, { status: 500 });
@@ -49,7 +55,7 @@ export async function POST(request: NextRequest) {
     const twiml = `<Response><Dial callerId="${twilioFrom}"><Number>${contact.phone}</Number></Dial></Response>`;
 
     const callParams = new URLSearchParams({
-      To: mikePhone || twilioFrom, // Call Mike first
+      To: repPhone || twilioFrom, // Call Mike first
       From: twilioFrom,
       Twiml: twiml,
       StatusCallback: statusCallback,
@@ -57,7 +63,7 @@ export async function POST(request: NextRequest) {
       StatusCallbackMethod: 'POST',
     });
 
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Calls.json`,
       {
         method: 'POST',
@@ -66,6 +72,7 @@ export async function POST(request: NextRequest) {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: callParams.toString(),
+        timeout: 30000,
       }
     );
 

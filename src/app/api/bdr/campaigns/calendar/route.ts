@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/campaigns/calendar?start=YYYY-MM-DD&end=YYYY-MM-DD
@@ -7,6 +8,8 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = new URL(request.url);
     const start = searchParams.get('start') || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
     const end = searchParams.get('end') || new Date().toISOString().split('T')[0];
@@ -41,11 +44,12 @@ export async function GET(request: NextRequest) {
         es.open_count,
         es.replied
        FROM bdr.email_sends es
-       JOIN bdr.leads l ON l.lead_id = es.lead_id
+       JOIN bdr.leads l ON l.lead_id = es.lead_id AND l.org_id = $3
        WHERE (es.sent_at >= $1 OR es.created_at >= $1)
          AND (es.sent_at <= ($2::date + interval '1 day') OR es.created_at <= ($2::date + interval '1 day'))
+         AND es.org_id = $3
        ORDER BY COALESCE(es.sent_at, es.created_at) ASC`,
-      [start, end]
+      [start, end, orgId]
     );
 
     // Also get campaign_emails with scheduled future sends
@@ -67,13 +71,14 @@ export async function GET(request: NextRequest) {
         ce.scheduled_send_at as scheduled_at,
         'scheduled' as status
        FROM bdr.campaign_emails ce
-       JOIN bdr.leads l ON l.lead_id::text = ce.lead_id::text
+       JOIN bdr.leads l ON l.lead_id::text = ce.lead_id::text AND l.org_id = $3
        WHERE ce.status = 'ready'
          AND ce.scheduled_send_at IS NOT NULL
          AND ce.scheduled_send_at >= $1
          AND ce.scheduled_send_at <= ($2::date + interval '1 day')
+         AND ce.org_id = $3
        ORDER BY ce.scheduled_send_at ASC`,
-      [start, end]
+      [start, end, orgId]
     ).catch(() => [] as typeof sends); // Table might not have scheduled_send_at column yet
 
     const allSends = [

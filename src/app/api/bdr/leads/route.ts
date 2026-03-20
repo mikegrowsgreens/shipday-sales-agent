@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/leads
@@ -8,6 +9,9 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const { searchParams } = request.nextUrl;
     const status = searchParams.get('status') || '';
     const tier = searchParams.get('tier') || '';
@@ -37,10 +41,10 @@ export async function GET(request: NextRequest) {
                   BOOL_OR(COALESCE(replied, false)) as has_reply,
                   MAX(reply_at) as last_reply_at
            FROM bdr.email_sends
-           WHERE lead_id = l.lead_id
+           WHERE lead_id = l.lead_id AND org_id = $2
          ) es_agg ON true
-         WHERE l.lead_id = $1`,
-        [leadId]
+         WHERE l.lead_id = $1 AND l.org_id = $2`,
+        [leadId, orgId]
       );
 
       if (detail.length === 0) {
@@ -52,9 +56,9 @@ export async function GET(request: NextRequest) {
         `SELECT id, email_type, subject, angle, variant_id, sent_at,
                 open_count, click_count, replied, reply_at, reply_sentiment
          FROM bdr.email_sends
-         WHERE lead_id = $1
+         WHERE lead_id = $1 AND org_id = $2
          ORDER BY sent_at DESC NULLS LAST`,
-        [leadId]
+        [leadId, orgId]
       );
 
       return NextResponse.json({ lead: detail[0], sends });
@@ -62,7 +66,8 @@ export async function GET(request: NextRequest) {
 
     // ─── Status distribution ─────────────────────────────
     const statusDist = await query<{ status: string; count: string }>(
-      `SELECT status, COUNT(*)::text as count FROM bdr.leads GROUP BY status ORDER BY COUNT(*) DESC`
+      `SELECT status, COUNT(*)::text as count FROM bdr.leads WHERE org_id = $1 GROUP BY status ORDER BY COUNT(*) DESC`,
+      [orgId]
     );
 
     // ─── Validate sort column (whitelist) ────────────────
@@ -92,10 +97,10 @@ export async function GET(request: NextRequest) {
              l.reply_date as last_reply_at,
              l.email_angle
       FROM bdr.leads l
-      WHERE 1=1
+      WHERE l.org_id = $1
     `;
-    const params: unknown[] = [];
-    let pi = 1;
+    const params: unknown[] = [orgId];
+    let pi = 2;
 
     if (status) {
       leadsSql += ` AND l.status = $${pi++}`;
@@ -118,9 +123,9 @@ export async function GET(request: NextRequest) {
     const leads = await query<Record<string, unknown>>(leadsSql, params);
 
     // ─── Total count (for pagination) ────────────────────
-    let countSql = `SELECT COUNT(*)::int as total FROM bdr.leads l WHERE 1=1`;
-    const countParams: unknown[] = [];
-    let ci = 1;
+    let countSql = `SELECT COUNT(*)::int as total FROM bdr.leads l WHERE l.org_id = $1`;
+    const countParams: unknown[] = [orgId];
+    let ci = 2;
     if (status) { countSql += ` AND l.status = $${ci++}`; countParams.push(status); }
     if (tier) { countSql += ` AND l.tier = $${ci++}`; countParams.push(tier); }
     if (search) {
@@ -135,17 +140,20 @@ export async function GET(request: NextRequest) {
     const intake = await query<{ day: string; count: string }>(
       `SELECT DATE(created_at)::text as day, COUNT(*)::text as count
        FROM bdr.leads
-       WHERE created_at > NOW() - INTERVAL '14 days'
+       WHERE org_id = $1 AND created_at > NOW() - INTERVAL '14 days'
        GROUP BY DATE(created_at)
-       ORDER BY day DESC`
+       ORDER BY day DESC`,
+      [orgId]
     );
 
     // ─── Tier breakdown ──────────────────────────────────
     const tierDist = await query<{ tier: string; count: string }>(
       `SELECT COALESCE(tier, 'unscored') as tier, COUNT(*)::text as count
        FROM bdr.leads
+       WHERE org_id = $1
        GROUP BY COALESCE(tier, 'unscored')
-       ORDER BY count DESC`
+       ORDER BY count DESC`,
+      [orgId]
     );
 
     const total = statusDist.reduce((sum, r) => sum + parseInt(r.count), 0);
@@ -170,6 +178,9 @@ export async function GET(request: NextRequest) {
  */
 export async function PATCH(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { lead_id, ...fields } = body as { lead_id: string; [key: string]: unknown };
 
@@ -196,9 +207,10 @@ export async function PATCH(request: NextRequest) {
 
     updates.push(`updated_at = NOW()`);
     params.push(lead_id);
+    params.push(orgId);
 
     await query(
-      `UPDATE bdr.leads SET ${updates.join(', ')} WHERE lead_id = $${pi}`,
+      `UPDATE bdr.leads SET ${updates.join(', ')} WHERE lead_id = $${pi} AND org_id = $${pi + 1}`,
       params
     );
 

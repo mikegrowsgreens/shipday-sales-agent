@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * PATCH /api/tasks/snooze
  * Snooze a task for a specified duration
  */
 export async function PATCH(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
   const { task_id, hours } = await request.json();
 
   if (!task_id || !hours) {

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { updateSignupSchema } from '@/lib/validators/settings';
 
 /**
  * GET /api/signups
@@ -8,6 +10,8 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = new URL(request.url);
     const territory = searchParams.get('territory') || '';
     const search = searchParams.get('search') || '';
@@ -16,14 +20,14 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200);
 
     let sql = `SELECT s.*, c.lifecycle_stage as contact_lifecycle
-               FROM crm.shipday_signups s
+               FROM crm.inbound_leads s
                LEFT JOIN crm.contacts c ON c.contact_id = s.contact_id
-               WHERE 1=1`;
-    const params: unknown[] = [];
-    let pi = 1;
+               WHERE s.org_id = $1`;
+    const params: unknown[] = [orgId];
+    let pi = 2;
 
     if (territory === 'mine') {
-      sql += ` AND s.territory_match = true`;
+      sql += ` AND s.territory_match::boolean = true`;
     }
 
     if (stage) {
@@ -51,13 +55,15 @@ export async function GET(request: NextRequest) {
 
     // Territory counts
     const territoryCounts = await query<{ territory_match: boolean; count: string }>(
-      `SELECT territory_match, COUNT(*) as count FROM crm.shipday_signups GROUP BY territory_match`
+      `SELECT territory_match, COUNT(*) as count FROM crm.inbound_leads WHERE org_id = $1 GROUP BY territory_match`,
+      [orgId]
     );
 
     // Funnel stage counts
     const funnelCounts = await query<{ funnel_stage: string; count: string }>(
       `SELECT COALESCE(funnel_stage, 'signup') as funnel_stage, COUNT(*)::text as count
-       FROM crm.shipday_signups GROUP BY funnel_stage`
+       FROM crm.inbound_leads WHERE org_id = $1 GROUP BY funnel_stage`,
+      [orgId]
     );
     const funnel: Record<string, number> = {};
     for (const row of funnelCounts) {
@@ -67,7 +73,8 @@ export async function GET(request: NextRequest) {
     // Attribution channel counts
     const attrCounts = await query<{ attribution_channel: string; count: string }>(
       `SELECT COALESCE(attribution_channel, 'organic') as attribution_channel, COUNT(*)::text as count
-       FROM crm.shipday_signups GROUP BY attribution_channel`
+       FROM crm.inbound_leads WHERE org_id = $1 GROUP BY attribution_channel`,
+      [orgId]
     );
     const attribution: Record<string, number> = {};
     for (const row of attrCounts) {
@@ -76,10 +83,12 @@ export async function GET(request: NextRequest) {
 
     // Stalled signups (signed up > 7 days ago, still at signup stage, not converted)
     const stalledRow = await query<{ count: string }>(
-      `SELECT COUNT(*)::text as count FROM crm.shipday_signups
-       WHERE funnel_stage = 'signup'
-       AND converted_to_lead = false
-       AND signup_date < NOW() - INTERVAL '7 days'`
+      `SELECT COUNT(*)::text as count FROM crm.inbound_leads
+       WHERE org_id = $1
+       AND funnel_stage = 'signup'
+       AND converted_to_lead::boolean = false
+       AND signup_date < NOW() - INTERVAL '7 days'`,
+      [orgId]
     );
 
     return NextResponse.json({
@@ -103,12 +112,14 @@ export async function GET(request: NextRequest) {
  */
 export async function PATCH(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
-    const { signup_id, funnel_stage, attribution_channel, attribution_source } = body;
-
-    if (!signup_id) {
-      return NextResponse.json({ error: 'signup_id required' }, { status: 400 });
+    const parsed = updateSignupSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
     }
+    const { signup_id, funnel_stage, attribution_channel, attribution_source } = parsed.data;
 
     const updates: string[] = [];
     const params: unknown[] = [];
@@ -117,7 +128,7 @@ export async function PATCH(request: NextRequest) {
     if (funnel_stage) {
       // Get current stage for event log
       const current = await query<{ funnel_stage: string }>(
-        `SELECT funnel_stage FROM crm.shipday_signups WHERE signup_id = $1`, [signup_id]
+        `SELECT funnel_stage FROM crm.inbound_leads WHERE signup_id = $1 AND org_id = $2`, [signup_id, orgId]
       );
       const fromStage = current[0]?.funnel_stage || 'signup';
 
@@ -138,9 +149,9 @@ export async function PATCH(request: NextRequest) {
 
       // Log funnel event
       await query(
-        `INSERT INTO crm.signup_funnel_events (signup_id, from_stage, to_stage, source)
-         VALUES ($1, $2, $3, 'manual')`,
-        [signup_id, fromStage, funnel_stage]
+        `INSERT INTO crm.signup_funnel_events (signup_id, from_stage, to_stage, source, org_id)
+         VALUES ($1, $2, $3, 'manual', $4)`,
+        [signup_id, fromStage, funnel_stage, orgId]
       );
     }
 
@@ -161,8 +172,10 @@ export async function PATCH(request: NextRequest) {
     }
 
     params.push(signup_id);
+    pi++;
+    params.push(orgId);
     await query(
-      `UPDATE crm.shipday_signups SET ${updates.join(', ')} WHERE signup_id = $${pi}`,
+      `UPDATE crm.inbound_leads SET ${updates.join(', ')} WHERE signup_id = $${pi - 1} AND org_id = $${pi}`,
       params
     );
 

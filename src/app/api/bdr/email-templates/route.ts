@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * Email Template Library API
@@ -11,6 +12,7 @@ async function ensureTable() {
   await query(`
     CREATE TABLE IF NOT EXISTS bdr.email_templates (
       id SERIAL PRIMARY KEY,
+      org_id UUID NOT NULL,
       name VARCHAR(255) NOT NULL,
       subject TEXT NOT NULL,
       body TEXT NOT NULL,
@@ -32,6 +34,8 @@ async function ensureTable() {
  */
 export async function GET() {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     await ensureTable();
 
     const templates = await query<{
@@ -49,7 +53,8 @@ export async function GET() {
       created_at: string;
       updated_at: string;
     }>(
-      `SELECT * FROM bdr.email_templates ORDER BY is_starred DESC, updated_at DESC`
+      `SELECT * FROM bdr.email_templates WHERE org_id = $1 ORDER BY is_starred DESC, updated_at DESC`,
+      [orgId]
     );
 
     return NextResponse.json({ templates });
@@ -64,6 +69,8 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     await ensureTable();
 
     const { name, subject, body, angle, tone, tier } = await request.json();
@@ -73,10 +80,10 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await query<{ id: number }>(
-      `INSERT INTO bdr.email_templates (name, subject, body, angle, tone, tier)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO bdr.email_templates (org_id, name, subject, body, angle, tone, tier)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id`,
-      [name, subject, body, angle || 'missed_calls', tone || 'professional', tier || null]
+      [orgId, name, subject, body, angle || 'missed_calls', tone || 'professional', tier || null]
     );
 
     return NextResponse.json({ id: result[0].id, created: true });
@@ -91,6 +98,8 @@ export async function POST(request: NextRequest) {
  */
 export async function PUT(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { id, ...updates } = body;
 
@@ -117,9 +126,11 @@ export async function PUT(request: NextRequest) {
 
     setClauses.push(`updated_at = NOW()`);
     params.push(id);
+    paramIdx++;
+    params.push(orgId);
 
     await query(
-      `UPDATE bdr.email_templates SET ${setClauses.join(', ')} WHERE id = $${paramIdx}`,
+      `UPDATE bdr.email_templates SET ${setClauses.join(', ')} WHERE id = $${paramIdx - 1} AND org_id = $${paramIdx}`,
       params
     );
 
@@ -135,6 +146,8 @@ export async function PUT(request: NextRequest) {
  */
 export async function DELETE(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
 
@@ -142,7 +155,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'id required' }, { status: 400 });
     }
 
-    await query('DELETE FROM bdr.email_templates WHERE id = $1', [id]);
+    await query('DELETE FROM bdr.email_templates WHERE id = $1 AND org_id = $2', [id, orgId]);
 
     return NextResponse.json({ deleted: true });
   } catch (error) {

@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/attribution
- * Revenue attribution data - trace closed deals through touch chains
+ * Revenue attribution data - trace closed deals through touch chains.
+ * Scoped to current tenant's org_id.
  */
 export async function GET(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
+
   const { searchParams } = new URL(request.url);
   const period = searchParams.get('period') || '90d';
   const days = period === '7d' ? 7 : period === '30d' ? 30 : 90;
@@ -28,15 +33,16 @@ export async function GET(request: NextRequest) {
         c.business_name,
         c.lifecycle_stage,
         c.updated_at as won_at,
-        (SELECT COUNT(*) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id)::text as total_touches,
-        (SELECT MIN(t.occurred_at) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id)::text as first_touch_date,
-        EXTRACT(DAY FROM c.updated_at - (SELECT MIN(t.occurred_at) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id))::text as days_to_close
+        (SELECT COUNT(*) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id AND t.org_id = $2)::text as total_touches,
+        (SELECT MIN(t.occurred_at) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id AND t.org_id = $2)::text as first_touch_date,
+        EXTRACT(DAY FROM c.updated_at - (SELECT MIN(t.occurred_at) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id AND t.org_id = $2))::text as days_to_close
       FROM crm.contacts c
       WHERE c.lifecycle_stage IN ('won', 'demo_completed', 'negotiation')
         AND c.updated_at >= NOW() - INTERVAL '1 day' * $1
+        AND c.org_id = $2
       ORDER BY c.updated_at DESC
       LIMIT 50
-    `, [days]);
+    `, [days, orgId]);
 
     // Touch chain details for won deals
     const touchChains = await query<{
@@ -57,11 +63,13 @@ export async function GET(request: NextRequest) {
         SELECT c.contact_id FROM crm.contacts c
         WHERE c.lifecycle_stage IN ('won', 'demo_completed', 'negotiation')
           AND c.updated_at >= NOW() - INTERVAL '1 day' * $1
+          AND c.org_id = $2
       )
+        AND t.org_id = $2
       ORDER BY t.contact_id, t.occurred_at ASC
-    `, [days]);
+    `, [days, orgId]);
 
-    // Channel attribution summary - which channels drive conversions
+    // Channel attribution summary
     const channelAttribution = await query<{
       channel: string;
       touch_count: string;
@@ -75,12 +83,14 @@ export async function GET(request: NextRequest) {
       WHERE t.contact_id IN (
         SELECT c.contact_id FROM crm.contacts c
         WHERE c.lifecycle_stage IN ('won', 'demo_completed', 'negotiation')
+          AND c.org_id = $1
       )
+        AND t.org_id = $1
       GROUP BY t.channel
       ORDER BY COUNT(*) DESC
-    `);
+    `, [orgId]);
 
-    // Email angle performance - which angles drive replies/bookings
+    // Email angle performance
     const anglePerformance = await query<{
       angle: string;
       total_sent: string;
@@ -102,11 +112,12 @@ export async function GET(request: NextRequest) {
       FROM bdr.email_sends es
       JOIN bdr.leads l ON l.lead_id = es.lead_id::text
       WHERE es.sent_at >= NOW() - INTERVAL '1 day' * $1
+        AND es.org_id = $2
       GROUP BY l.email_angle
       ORDER BY COUNT(CASE WHEN es.replied = true THEN 1 END) DESC
-    `, [days]);
+    `, [days, orgId]);
 
-    // Sequence attribution - which sequences drive conversions
+    // Sequence attribution
     const sequenceAttribution = await query<{
       sequence_id: number;
       sequence_name: string;
@@ -129,10 +140,11 @@ export async function GET(request: NextRequest) {
         END as conversion_rate
       FROM crm.sequences s
       LEFT JOIN crm.sequence_enrollments se ON se.sequence_id = s.sequence_id
+      WHERE s.org_id = $1
       GROUP BY s.sequence_id, s.name
       HAVING COUNT(se.enrollment_id) > 0
       ORDER BY COUNT(CASE WHEN se.status IN ('replied','booked') THEN 1 END) DESC
-    `);
+    `, [orgId]);
 
     // Average touches to conversion
     const avgTouches = await query<{
@@ -147,13 +159,14 @@ export async function GET(request: NextRequest) {
       FROM (
         SELECT
           c.contact_id,
-          (SELECT COUNT(*) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id) as touch_count,
-          EXTRACT(DAY FROM c.updated_at - (SELECT MIN(t.occurred_at) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id)) as days_to_first
+          (SELECT COUNT(*) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id AND t.org_id = $1) as touch_count,
+          EXTRACT(DAY FROM c.updated_at - (SELECT MIN(t.occurred_at) FROM crm.touchpoints t WHERE t.contact_id = c.contact_id AND t.org_id = $1)) as days_to_first
         FROM crm.contacts c
         WHERE c.lifecycle_stage = 'won'
+          AND c.org_id = $1
       ) sub
       WHERE touch_count > 0
-    `);
+    `, [orgId]);
 
     // Group touch chains by contact
     const chainsByContact: Record<number, typeof touchChains> = {};

@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/tasks/batch
  * Batch complete or skip multiple tasks
  */
 export async function POST(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
   const { task_ids, action, outcome } = await request.json();
 
   if (!task_ids || !Array.isArray(task_ids) || task_ids.length === 0) {

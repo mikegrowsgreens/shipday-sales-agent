@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 import Anthropic from '@anthropic-ai/sdk';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
+import { sanitizeInput, detectInjection, INPUT_LIMITS, armorSystemPrompt } from '@/lib/prompt-guard';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
@@ -16,6 +19,13 @@ const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const { source_type, content, metadata } = await request.json();
 
     if (!source_type || !content) {
@@ -24,6 +34,33 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // Validate content length
+    if (content.length > INPUT_LIMITS.brain_content) {
+      return NextResponse.json(
+        { error: `Content exceeds ${INPUT_LIMITS.brain_content} character limit` },
+        { status: 400 }
+      );
+    }
+
+    // Check for prompt injection patterns
+    const injectionMatch = detectInjection(content);
+    if (injectionMatch) {
+      console.warn(`[brain/import] Injection pattern detected: "${injectionMatch}" from org ${orgId}`);
+      return NextResponse.json(
+        { error: 'Content contains potentially malicious patterns. Please remove instruction-like text and retry.' },
+        { status: 400 }
+      );
+    }
+
+    // Sanitize metadata fields
+    const safeMetadata = {
+      business_name: sanitizeInput(metadata?.business_name, INPUT_LIMITS.contact_field),
+      call_outcome: sanitizeInput(metadata?.call_outcome, INPUT_LIMITS.contact_field),
+      angle: sanitizeInput(metadata?.angle, INPUT_LIMITS.angle),
+      reply_sentiment: sanitizeInput(metadata?.reply_sentiment, INPUT_LIMITS.contact_field),
+      category: sanitizeInput(metadata?.category, INPUT_LIMITS.contact_field),
+    };
 
     let systemPrompt = '';
     let userPrompt = '';
@@ -47,7 +84,7 @@ Focus on extracting:
 6. Value props that landed well
 
 Be specific and actionable. Each entry should be independently useful.`;
-        userPrompt = `Extract sales intelligence from this Fathom call transcript:\n\n${content}${metadata?.business_name ? `\n\nBusiness: ${metadata.business_name}` : ''}${metadata?.call_outcome ? `\nCall Outcome: ${metadata.call_outcome}` : ''}`;
+        userPrompt = `Extract sales intelligence from this Fathom call transcript:\n\n<user-data label="transcript">\n${content}\n</user-data>${safeMetadata.business_name ? `\n\nBusiness: ${safeMetadata.business_name}` : ''}${safeMetadata.call_outcome ? `\nCall Outcome: ${safeMetadata.call_outcome}` : ''}`;
         break;
 
       case 'email_reply':
@@ -61,7 +98,7 @@ Be specific and actionable. Each entry should be independently useful.`;
    - content: The specific pattern or phrase worth learning
 
 Focus on what made this email successful and what patterns can be reused.`;
-        userPrompt = `Analyze this email exchange:\n\n${content}${metadata?.angle ? `\n\nAngle used: ${metadata.angle}` : ''}${metadata?.reply_sentiment ? `\nReply sentiment: ${metadata.reply_sentiment}` : ''}`;
+        userPrompt = `Analyze this email exchange:\n\n<user-data label="email-exchange">\n${content}\n</user-data>${safeMetadata.angle ? `\n\nAngle used: ${safeMetadata.angle}` : ''}${safeMetadata.reply_sentiment ? `\nReply sentiment: ${safeMetadata.reply_sentiment}` : ''}`;
         break;
 
       case 'bulk_text':
@@ -74,7 +111,7 @@ Focus on what made this email successful and what patterns can be reused.`;
 - pain_points_addressed: Pain points if applicable (string[])
 
 Break the text into logical, independently useful entries. Each should have a clear purpose.`;
-        userPrompt = `Structure this content into brain entries:\n\n${content}${metadata?.category ? `\n\nIntended category: ${metadata.category}` : ''}`;
+        userPrompt = `Structure this content into brain entries:\n\n<user-data label="content">\n${content}\n</user-data>${safeMetadata.category ? `\n\nIntended category: ${safeMetadata.category}` : ''}`;
         break;
 
       default:
@@ -88,7 +125,7 @@ Break the text into logical, independently useful entries. Each should have a cl
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: 4096,
-      system: systemPrompt,
+      system: armorSystemPrompt(systemPrompt),
       messages: [{ role: 'user', content: userPrompt }],
     });
 
@@ -118,8 +155,8 @@ Break the text into logical, independently useful entries. Each should have a cl
         if (!entry.title || !entry.raw_text) continue;
         await query(
           `INSERT INTO brain.internal_content
-           (id, content_hash, content_type, title, raw_text, key_claims, value_props, pain_points_addressed, source_type, is_active, created_at, updated_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, 'import', true, NOW(), NOW())`,
+           (id, content_hash, content_type, title, raw_text, key_claims, value_props, pain_points_addressed, source_type, is_active, org_id, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, 'import', true, $8, NOW(), NOW())`,
           [
             `import_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             entry.content_type || 'winning_phrases',
@@ -128,6 +165,7 @@ Break the text into logical, independently useful entries. Each should have a cl
             JSON.stringify(entry.key_claims || []),
             JSON.stringify(entry.value_props || []),
             JSON.stringify(entry.pain_points_addressed || []),
+            orgId,
           ]
         );
         results.push(`Brain: ${entry.title}`);
@@ -136,8 +174,8 @@ Break the text into logical, independently useful entries. Each should have a cl
       for (const pattern of autoLearned) {
         if (!pattern.content) continue;
         await query(
-          `INSERT INTO brain.auto_learned (source_type, source_id, pattern_type, content, context, confidence)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
+          `INSERT INTO brain.auto_learned (source_type, source_id, pattern_type, content, context, confidence, org_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             'email_import',
             null,
@@ -145,6 +183,7 @@ Break the text into logical, independently useful entries. Each should have a cl
             pattern.content,
             JSON.stringify(metadata || {}),
             0.7,
+            orgId,
           ]
         );
         results.push(`Learned: ${pattern.content.slice(0, 50)}...`);
@@ -157,8 +196,8 @@ Break the text into logical, independently useful entries. Each should have a cl
         if (!entry.title || !entry.raw_text) continue;
         await query(
           `INSERT INTO brain.internal_content
-           (id, content_hash, content_type, title, raw_text, key_claims, value_props, pain_points_addressed, source_type, is_active, created_at, updated_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, true, NOW(), NOW())`,
+           (id, content_hash, content_type, title, raw_text, key_claims, value_props, pain_points_addressed, source_type, is_active, org_id, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, true, $9, NOW(), NOW())`,
           [
             `import_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             entry.content_type || 'call_intelligence',
@@ -168,6 +207,7 @@ Break the text into logical, independently useful entries. Each should have a cl
             JSON.stringify(entry.value_props || []),
             JSON.stringify(entry.pain_points_addressed || []),
             source_type === 'fathom_transcript' ? 'fathom_import' : 'import',
+            orgId,
           ]
         );
         results.push(`Imported: ${entry.title}`);

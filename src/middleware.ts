@@ -11,6 +11,11 @@ const getSecret = () => {
 
 const publicPaths = [
   '/login',
+  '/signup',
+  '/forgot-password',
+  '/reset-password',
+  '/terms',
+  '/privacy',
   '/api/auth',
   '/api/webhooks',
   '/api/sequences/execute',
@@ -20,6 +25,12 @@ const publicPaths = [
   '/api/track',
   '/chat',
   '/api/chat/prospect',
+  '/api/scheduling/slots',
+  '/api/scheduling/book',
+  '/api/scheduling/cancel',
+  '/api/scheduling/public',
+  '/api/scheduling/embed.js',
+  '/book',
   // Note: /api/brain/sync removed from public paths — now requires auth (P1-8)
 ];
 
@@ -28,12 +39,25 @@ export async function middleware(request: NextRequest) {
 
   // Allow public paths and webhook endpoints
   if (publicPaths.some(p => pathname.startsWith(p))) {
-    return NextResponse.next();
+    const response = NextResponse.next();
+    response.headers.set('x-pathname', pathname);
+    return response;
+  }
+
+  const isApiRoute = pathname.startsWith('/api/');
+
+  // API key auth for API routes (Bearer sk_...) — bypass JWT/session check
+  if (isApiRoute) {
+    const authHeader = request.headers.get('Authorization');
+    if (authHeader?.startsWith('Bearer sk_')) {
+      // API key validation happens in the route handler (api-auth.ts)
+      // Middleware just passes it through — the route validates the key
+      return NextResponse.next();
+    }
   }
 
   // Check session cookie
   const token = request.cookies.get('session')?.value;
-  const isApiRoute = pathname.startsWith('/api/');
 
   if (!token) {
     if (isApiRoute) {
@@ -44,7 +68,9 @@ export async function middleware(request: NextRequest) {
 
   try {
     await jwtVerify(token, getSecret());
-    return NextResponse.next();
+    const response = NextResponse.next();
+    response.headers.set('x-pathname', pathname);
+    return response;
   } catch {
     if (isApiRoute) {
       return NextResponse.json({ error: 'Session expired' }, { status: 401 });

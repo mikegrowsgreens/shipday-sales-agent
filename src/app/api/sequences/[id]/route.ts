@@ -1,17 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { withAuth } from '@/lib/route-auth';
+import { logAuditEvent } from '@/lib/audit';
 
 // GET /api/sequences/[id] - Get sequence with steps + enrollment stats + metrics
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  const sequenceId = parseInt(id);
+export const GET = withAuth(async (request, { orgId, params }) => {
+  const sequenceId = parseInt(params?.id || '');
 
   const sequence = await queryOne(
-    `SELECT * FROM crm.sequences WHERE sequence_id = $1`,
-    [sequenceId]
+    `SELECT * FROM crm.sequences WHERE sequence_id = $1 AND org_id = $2`,
+    [sequenceId, orgId]
   );
 
   if (!sequence) {
@@ -31,13 +29,12 @@ export async function GET(
       COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '') as contact_name
      FROM crm.sequence_enrollments e
      JOIN crm.contacts c ON c.contact_id = e.contact_id
-     WHERE e.sequence_id = $1
+     WHERE e.sequence_id = $1 AND e.org_id = $2
      ORDER BY e.created_at DESC
      LIMIT 200`,
-    [sequenceId]
+    [sequenceId, orgId]
   );
 
-  // Try to get step metrics (materialized view may not exist yet)
   let stepMetrics: unknown[] = [];
   try {
     stepMetrics = await query(
@@ -45,14 +42,9 @@ export async function GET(
       [sequenceId]
     );
   } catch {
-    // Fallback: compute metrics inline
     stepMetrics = await query(
       `SELECT
-        ss.step_id,
-        ss.sequence_id,
-        ss.step_order,
-        ss.step_type,
-        ss.branch_condition,
+        ss.step_id, ss.sequence_id, ss.step_order, ss.step_type, ss.branch_condition,
         COUNT(DISTINCT sse.execution_id) as total_executions,
         COUNT(DISTINCT sse.execution_id) FILTER (WHERE sse.status IN ('sent','delivered','opened','clicked','replied','completed'))::int as sent_count,
         COUNT(DISTINCT sse.execution_id) FILTER (WHERE sse.status IN ('opened','clicked','replied'))::int as opened_count,
@@ -88,13 +80,9 @@ export async function GET(
     );
   }
 
-  // Compute analytics summary
   const enrollmentStats = await queryOne<{
-    total_enrolled: string;
-    active_enrolled: string;
-    completed: string;
-    replied: string;
-    booked: string;
+    total_enrolled: string; active_enrolled: string;
+    completed: string; replied: string; booked: string;
   }>(
     `SELECT
       COUNT(*)::text as total_enrolled,
@@ -103,8 +91,8 @@ export async function GET(
       COUNT(*) FILTER (WHERE status = 'replied')::text as replied,
       COUNT(*) FILTER (WHERE status = 'booked')::text as booked
      FROM crm.sequence_enrollments
-     WHERE sequence_id = $1`,
-    [sequenceId]
+     WHERE sequence_id = $1 AND org_id = $2`,
+    [sequenceId, orgId]
   );
 
   const analytics = {
@@ -119,18 +107,21 @@ export async function GET(
   };
 
   return NextResponse.json({ sequence, steps, enrollments, analytics });
-}
+});
 
 // PATCH /api/sequences/[id] - Update sequence fields or steps
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  const sequenceId = parseInt(id);
+export const PATCH = withAuth(async (request, { tenant, orgId, params }) => {
+  const sequenceId = parseInt(params?.id || '');
   const body = await request.json();
 
-  // Update sequence metadata
+  const existing = await queryOne(
+    `SELECT sequence_id FROM crm.sequences WHERE sequence_id = $1 AND org_id = $2`,
+    [sequenceId, orgId]
+  );
+  if (!existing) {
+    return NextResponse.json({ error: 'Sequence not found' }, { status: 404 });
+  }
+
   const metaKeys = ['name', 'description', 'is_active', 'pause_on_reply', 'pause_on_booking', 'is_template', 'template_category', 'tags'];
   const metaUpdates = metaKeys.filter(k => body[k] !== undefined);
   if (metaUpdates.length > 0) {
@@ -138,19 +129,13 @@ export async function PATCH(
     const vals: unknown[] = [];
     let idx = 1;
     for (const key of metaUpdates) {
-      if (key === 'tags') {
-        sets.push(`${key} = $${idx++}`);
-        vals.push(body[key]);
-      } else {
-        sets.push(`${key} = $${idx++}`);
-        vals.push(body[key]);
-      }
+      sets.push(`${key} = $${idx++}`);
+      vals.push(body[key]);
     }
-    vals.push(sequenceId);
-    await query(`UPDATE crm.sequences SET ${sets.join(', ')} WHERE sequence_id = $${idx}`, vals);
+    vals.push(sequenceId, orgId);
+    await query(`UPDATE crm.sequences SET ${sets.join(', ')} WHERE sequence_id = $${idx} AND org_id = $${idx + 1}`, vals);
   }
 
-  // Replace steps if provided
   if (body.steps && Array.isArray(body.steps)) {
     await query(`DELETE FROM crm.sequence_steps WHERE sequence_id = $1`, [sequenceId]);
 
@@ -168,20 +153,12 @@ export async function PATCH(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         RETURNING step_id`,
         [
-          sequenceId,
-          step.step_order || i + 1,
-          step.step_type || 'email',
-          step.delay_days ?? 0,
-          step.send_window_start || '09:00',
-          step.send_window_end || '17:00',
-          step.subject_template || null,
-          step.body_template || null,
-          step.task_instructions || null,
-          step.variant_label || null,
-          step.branch_condition || null,
-          step.branch_wait_days ?? 2,
-          step.is_exit_step ?? false,
-          step.exit_action || null,
+          sequenceId, step.step_order || i + 1, step.step_type || 'email',
+          step.delay_days ?? 0, step.send_window_start || '09:00', step.send_window_end || '17:00',
+          step.subject_template || null, step.body_template || null,
+          step.task_instructions || null, step.variant_label || null,
+          step.branch_condition || null, step.branch_wait_days ?? 2,
+          step.is_exit_step ?? false, step.exit_action || null,
           JSON.stringify(step.exit_action_config || {}),
         ]
       );
@@ -191,7 +168,6 @@ export async function PATCH(
       }
     }
 
-    // Update parent_step_id references
     for (let i = 0; i < body.steps.length; i++) {
       const step = body.steps[i];
       if (step.parent_step_order) {
@@ -207,21 +183,47 @@ export async function PATCH(
     }
   }
 
-  const sequence = await queryOne(`SELECT * FROM crm.sequences WHERE sequence_id = $1`, [sequenceId]);
+  const sequence = await queryOne(`SELECT * FROM crm.sequences WHERE sequence_id = $1 AND org_id = $2`, [sequenceId, orgId]);
   const steps = await query(`SELECT * FROM crm.sequence_steps WHERE sequence_id = $1 ORDER BY step_order`, [sequenceId]);
+
+  logAuditEvent({
+    orgId: tenant.org_id,
+    userId: tenant.user_id,
+    action: 'sequence.update',
+    resourceType: 'sequence',
+    resourceId: String(sequenceId),
+    details: { updated_fields: metaUpdates, has_step_changes: !!body.steps },
+    request,
+  });
+
   return NextResponse.json({ sequence, steps });
-}
+});
 
 // DELETE /api/sequences/[id] - Delete sequence
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  const sequenceId = parseInt(id);
-  await query(`DELETE FROM crm.sequence_step_executions WHERE enrollment_id IN (SELECT enrollment_id FROM crm.sequence_enrollments WHERE sequence_id = $1)`, [sequenceId]);
-  await query(`DELETE FROM crm.sequence_enrollments WHERE sequence_id = $1`, [sequenceId]);
+export const DELETE = withAuth(async (request, { tenant, orgId, params }) => {
+  const sequenceId = parseInt(params?.id || '');
+
+  const existing = await queryOne(
+    `SELECT sequence_id FROM crm.sequences WHERE sequence_id = $1 AND org_id = $2`,
+    [sequenceId, orgId]
+  );
+  if (!existing) {
+    return NextResponse.json({ error: 'Sequence not found' }, { status: 404 });
+  }
+
+  await query(`DELETE FROM crm.sequence_step_executions WHERE enrollment_id IN (SELECT enrollment_id FROM crm.sequence_enrollments WHERE sequence_id = $1 AND org_id = $2)`, [sequenceId, orgId]);
+  await query(`DELETE FROM crm.sequence_enrollments WHERE sequence_id = $1 AND org_id = $2`, [sequenceId, orgId]);
   await query(`DELETE FROM crm.sequence_steps WHERE sequence_id = $1`, [sequenceId]);
-  await query(`DELETE FROM crm.sequences WHERE sequence_id = $1`, [sequenceId]);
+  await query(`DELETE FROM crm.sequences WHERE sequence_id = $1 AND org_id = $2`, [sequenceId, orgId]);
+
+  logAuditEvent({
+    orgId: tenant.org_id,
+    userId: tenant.user_id,
+    action: 'sequence.delete',
+    resourceType: 'sequence',
+    resourceId: String(sequenceId),
+    request,
+  });
+
   return NextResponse.json({ deleted: true });
-}
+});

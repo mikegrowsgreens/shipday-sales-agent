@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Check, Clock, Edit3, X, Loader2, Calendar, Send, FlaskConical, CalendarClock, ChevronDown, ChevronUp, Mail, MailCheck, MailX } from 'lucide-react';
+import { Check, Clock, Edit3, X, Loader2, Calendar, Send, CalendarClock, ChevronDown, ChevronUp, Mail, MailCheck, MailX } from 'lucide-react';
 import DraftEditor from '@/components/followups/DraftEditor';
+import TestSendButton from '@/components/ui/TestSendButton';
 
 interface Draft {
   id: number;
@@ -63,8 +64,6 @@ export default function CampaignTimeline({ drafts, onSaveDraft, onApproveDraft, 
   const [rescheduleSaving, setRescheduleSaving] = useState(false);
   const [reschedulingId, setReschedulingId] = useState<number | null>(null);
   const [rescheduleDate, setRescheduleDate] = useState('');
-  const [testSendingId, setTestSendingId] = useState<number | null>(null);
-  const [testSentId, setTestSentId] = useState<number | null>(null);
   const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
 
   // Per-touch scheduling
@@ -197,19 +196,13 @@ export default function CampaignTimeline({ drafts, onSaveDraft, onApproveDraft, 
     }
   };
 
-  const handleTestSend = async (draftId: number) => {
-    setTestSendingId(draftId);
-    try {
-      await fetch('/api/followups/test-send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ draft_id: draftId }),
-      });
-      setTestSentId(draftId);
-      setTimeout(() => setTestSentId(null), 3000);
-    } finally {
-      setTestSendingId(null);
-    }
+  const handleTestSend = async (draftId: number, email: string) => {
+    const res = await fetch('/api/followups/test-send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft_id: draftId, recipient_email: email }),
+    });
+    if (!res.ok) throw new Error('Test send failed');
   };
 
   const pendingDrafts = drafts.filter(d => d.status === 'draft');
@@ -382,20 +375,10 @@ export default function CampaignTimeline({ drafts, onSaveDraft, onApproveDraft, 
                       </button>
                     )}
                     {draft.status !== 'sent' && (
-                      <button
-                        onClick={() => handleTestSend(draft.id)}
-                        disabled={testSendingId === draft.id}
-                        className="p-1 text-gray-500 hover:text-blue-400"
-                        title="Send test to your email"
-                      >
-                        {testSendingId === draft.id ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : testSentId === draft.id ? (
-                          <Check className="w-3.5 h-3.5 text-green-400" />
-                        ) : (
-                          <FlaskConical className="w-3.5 h-3.5" />
-                        )}
-                      </button>
+                      <TestSendButton
+                        onSend={(email) => handleTestSend(draft.id, email)}
+                        size="sm"
+                      />
                     )}
                     {canReschedule && (
                       <button

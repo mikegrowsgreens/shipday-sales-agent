@@ -1,13 +1,14 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Loader2, Search, Phone, Clock, MessageSquare, ExternalLink, Video, Bot,
   PhoneCall, PhoneOff, PhoneMissed, Voicemail, CalendarCheck, Filter,
   ChevronDown, ChevronUp, BarChart3, ListTodo, Brain, Mail, Send,
   TrendingUp, Zap, Target, ArrowRight, AlertCircle, CheckCircle2,
-  X, MessageCircle, FileText,
+  X, MessageCircle, FileText, Volume2,
 } from 'lucide-react';
+import CallDetailPanel from '@/components/calls/CallDetailPanel';
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -113,6 +114,7 @@ interface AnalyticsData {
   disposition_breakdown: Array<{ disposition: string; count: number }>;
   hourly_analysis: Array<{ hour: number; total: number; connected: number; connect_rate: number }>;
   day_of_week: Array<{ dow: number; day_name: string; total: number; connected: number; connect_rate: number }>;
+  top_contacts: Array<{ contact_id: number; first_name: string | null; business_name: string | null; call_count: number; connected_count: number; total_duration: number }>;
   best_calling_time: string;
   best_calling_day: string;
   days: number;
@@ -348,9 +350,11 @@ function CallLogTab() {
   const [disposition, setDisposition] = useState('');
   const [total, setTotal] = useState(0);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [focusedIdx, setFocusedIdx] = useState<number>(-1);
   const [outcomeCallId, setOutcomeCallId] = useState<number | null>(null);
   const [emailBridgeCallId, setEmailBridgeCallId] = useState<number | null>(null);
   const [smsContactId, setSmsContactId] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const fetchCalls = useCallback(async () => {
     setLoading(true);
@@ -370,6 +374,56 @@ function CallLogTab() {
 
   useEffect(() => { fetchCalls(); }, [fetchCalls]);
 
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't capture keys when focused on input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+
+      if (calls.length === 0) return;
+
+      switch (e.key) {
+        case 'ArrowDown':
+        case 'j': {
+          e.preventDefault();
+          const next = Math.min(focusedIdx + 1, calls.length - 1);
+          setFocusedIdx(next);
+          // Scroll the focused row into view
+          const rows = listRef.current?.querySelectorAll('[data-call-row]');
+          rows?.[next]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          break;
+        }
+        case 'ArrowUp':
+        case 'k': {
+          e.preventDefault();
+          const prev = Math.max(focusedIdx - 1, 0);
+          setFocusedIdx(prev);
+          const rows = listRef.current?.querySelectorAll('[data-call-row]');
+          rows?.[prev]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          break;
+        }
+        case 'Enter': {
+          e.preventDefault();
+          if (focusedIdx >= 0 && focusedIdx < calls.length) {
+            const call = calls[focusedIdx];
+            setExpandedId(expandedId === call.call_id ? null : call.call_id);
+          }
+          break;
+        }
+        case 'Escape': {
+          if (expandedId !== null) {
+            e.preventDefault();
+            setExpandedId(null);
+          }
+          break;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [calls, focusedIdx, expandedId]);
+
   const dispositionIcons: Record<string, { icon: typeof Phone; color: string }> = {
     connected: { icon: PhoneCall, color: 'text-green-400' },
     voicemail: { icon: Voicemail, color: 'text-yellow-400' },
@@ -377,6 +431,14 @@ function CallLogTab() {
     busy: { icon: PhoneOff, color: 'text-orange-400' },
     'wrong-number': { icon: AlertCircle, color: 'text-red-500' },
     'meeting-booked': { icon: CalendarCheck, color: 'text-blue-400' },
+  };
+
+  const handleNotesUpdated = (callId: number, notes: string) => {
+    setCalls(prev => prev.map(c => c.call_id === callId ? { ...c, notes } : c));
+  };
+
+  const handleDispositionUpdated = (callId: number, newDispo: string) => {
+    setCalls(prev => prev.map(c => c.call_id === callId ? { ...c, disposition: newDispo } : c));
   };
 
   return (
@@ -416,19 +478,42 @@ function CallLogTab() {
           <p className="text-gray-500">No phone calls found</p>
         </div>
       ) : (
-        <div className="space-y-2">
-          <p className="text-xs text-gray-500">{total} calls</p>
-          {calls.map(call => {
+        <div className="space-y-2" ref={listRef}>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-gray-500">{total} calls</p>
+            <p className="text-[10px] text-gray-600">
+              <kbd className="bg-gray-800 px-1 py-0.5 rounded text-gray-500">j</kbd>/<kbd className="bg-gray-800 px-1 py-0.5 rounded text-gray-500">k</kbd> navigate
+              <span className="mx-1.5">|</span>
+              <kbd className="bg-gray-800 px-1 py-0.5 rounded text-gray-500">Enter</kbd> expand
+              <span className="mx-1.5">|</span>
+              <kbd className="bg-gray-800 px-1 py-0.5 rounded text-gray-500">Esc</kbd> close
+            </p>
+          </div>
+          {calls.map((call, idx) => {
             const isExpanded = expandedId === call.call_id;
+            const isFocused = focusedIdx === idx;
             const name = [call.first_name, call.last_name].filter(Boolean).join(' ') || call.email || 'Unknown';
             const dispo = dispositionIcons[call.disposition || ''];
             const DispoIcon = dispo?.icon || Phone;
 
             return (
-              <div key={call.call_id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+              <div
+                key={call.call_id}
+                data-call-row
+                className={`bg-gray-900 rounded-xl overflow-hidden transition-all ${
+                  isExpanded
+                    ? 'border-2 border-blue-500/40 shadow-lg shadow-blue-500/5'
+                    : isFocused
+                      ? 'border-2 border-gray-600'
+                      : 'border border-gray-800 hover:border-gray-700'
+                }`}
+              >
                 <button
-                  onClick={() => setExpandedId(isExpanded ? null : call.call_id)}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-800/50 transition-colors"
+                  onClick={() => {
+                    setExpandedId(isExpanded ? null : call.call_id);
+                    setFocusedIdx(idx);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-800/50 transition-colors cursor-pointer"
                 >
                   <DispoIcon className={`w-4 h-4 ${dispo?.color || 'text-gray-400'} flex-shrink-0`} />
                   <div className="flex-1 min-w-0">
@@ -452,6 +537,16 @@ function CallLogTab() {
                           {call.disposition}
                         </span>
                       )}
+                      {call.recording_url && (
+                        <span className="text-[10px] text-green-600 flex items-center gap-0.5">
+                          <Volume2 className="w-3 h-3" />
+                        </span>
+                      )}
+                      {call.notes && (
+                        <span className="text-[10px] text-gray-600 flex items-center gap-0.5">
+                          <FileText className="w-3 h-3" />
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -461,46 +556,18 @@ function CallLogTab() {
                     </span>
                   </div>
 
-                  {isExpanded ? <ChevronUp className="w-4 h-4 text-gray-500" /> : <ChevronDown className="w-4 h-4 text-gray-500" />}
+                  {isExpanded ? <ChevronUp className="w-4 h-4 text-blue-400" /> : <ChevronDown className="w-4 h-4 text-gray-500" />}
                 </button>
 
                 {isExpanded && (
-                  <div className="px-4 py-3 border-t border-gray-800 bg-gray-800/30 space-y-3">
-                    {call.notes && (
-                      <div>
-                        <span className="text-[10px] text-gray-500 uppercase">Notes</span>
-                        <p className="text-xs text-gray-300 mt-1">{call.notes}</p>
-                      </div>
-                    )}
-                    <div className="grid grid-cols-4 gap-3 text-center">
-                      <div><div className="text-[10px] text-gray-500">Duration</div><div className="text-xs text-white">{formatDuration(call.duration_seconds)}</div></div>
-                      <div><div className="text-[10px] text-gray-500">Direction</div><div className="text-xs text-white capitalize">{call.direction}</div></div>
-                      <div><div className="text-[10px] text-gray-500">Status</div><div className="text-xs text-white">{call.status}</div></div>
-                      <div><div className="text-[10px] text-gray-500">Contact</div><div className="text-xs text-white">{call.phone || '--'}</div></div>
-                    </div>
-
-                    {/* Action buttons */}
-                    <div className="flex items-center gap-2 pt-2 border-t border-gray-800/50">
-                      {!call.disposition && (
-                        <button onClick={() => setOutcomeCallId(call.call_id)}
-                          className="flex items-center gap-1 bg-green-600 hover:bg-green-700 text-white text-xs px-3 py-1.5 rounded-lg">
-                          <CheckCircle2 className="w-3 h-3" /> Log Outcome
-                        </button>
-                      )}
-                      <button onClick={() => setEmailBridgeCallId(call.call_id)}
-                        className="flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1.5 rounded-lg">
-                        <Mail className="w-3 h-3" /> Send Follow-Up
-                      </button>
-                      <button onClick={() => setSmsContactId(call.contact_id)}
-                        className="flex items-center gap-1 bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1.5 rounded-lg">
-                        <MessageCircle className="w-3 h-3" /> SMS
-                      </button>
-                      <a href={`/contacts/${call.contact_id}`}
-                        className="flex items-center gap-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs px-3 py-1.5 rounded-lg">
-                        <ExternalLink className="w-3 h-3" /> Contact
-                      </a>
-                    </div>
-                  </div>
+                  <CallDetailPanel
+                    call={call}
+                    onClose={() => setExpandedId(null)}
+                    onNotesUpdated={handleNotesUpdated}
+                    onDispositionUpdated={handleDispositionUpdated}
+                    onEmailBridge={(callId) => setEmailBridgeCallId(callId)}
+                    onSms={(contactId) => setSmsContactId(contactId)}
+                  />
                 )}
               </div>
             );
@@ -530,6 +597,30 @@ function FathomTab() {
   const [search, setSearch] = useState('');
   const [days, setDays] = useState('30');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncRange, setSyncRange] = useState('1');
+  const [syncResult, setSyncResult] = useState<{ inserted: number; updated: number } | null>(null);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const res = await fetch('/api/calls/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: parseFloat(syncRange) }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setSyncResult({ inserted: data.inserted, updated: data.updated });
+      fetchCalls();
+    } catch (err) {
+      console.error('[fathom] sync error:', err);
+      alert(err instanceof Error ? err.message : 'Sync failed');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const fetchCalls = useCallback(async () => {
     setLoading(true);
@@ -564,7 +655,27 @@ function FathomTab() {
             placeholder="Search Fathom calls..."
             className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder:text-gray-500 focus:outline-none focus:border-blue-500" />
         </div>
+        <select value={syncRange} onChange={(e) => setSyncRange(e.target.value)}
+          className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-green-500">
+          <option value="1">24 hours</option>
+          <option value="3">3 days</option>
+          <option value="7">7 days</option>
+          <option value="14">14 days</option>
+          <option value="30">30 days</option>
+          <option value="0">All time</option>
+        </select>
+        <button onClick={handleSync} disabled={syncing}
+          className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-xs px-3 py-1.5 rounded-lg transition-colors">
+          {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+          {syncing ? 'Syncing...' : 'Sync'}
+        </button>
       </div>
+      {syncResult && (
+        <div className="flex items-center gap-2 text-xs text-green-400 bg-green-900/20 border border-green-800/30 rounded-lg px-3 py-2">
+          <CheckCircle2 className="w-3.5 h-3.5" />
+          Synced: {syncResult.inserted} new, {syncResult.updated} updated
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-12"><Loader2 className="w-6 h-6 text-gray-500 animate-spin" /></div>
@@ -775,6 +886,26 @@ function AnalyticsTab() {
                 <div className="text-[10px] text-gray-500 mb-1">{d.day_name.trim().substring(0, 3)}</div>
                 <div className="text-sm font-bold text-white">{d.total}</div>
                 <div className="text-[10px] text-green-400">{d.connect_rate}%</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Top Contacts */}
+      {data.top_contacts && data.top_contacts.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">Top Contacts</h3>
+          <div className="space-y-2">
+            {data.top_contacts.map(c => (
+              <div key={c.contact_id} className="flex items-center gap-3 text-xs">
+                <div className="flex-1 min-w-0">
+                  <span className="text-white font-medium truncate block">{c.first_name || c.business_name || 'Unknown'}</span>
+                  {c.business_name && c.first_name && <span className="text-gray-500 text-[10px]">{c.business_name}</span>}
+                </div>
+                <span className="text-gray-400 w-16 text-right">{c.call_count} calls</span>
+                <span className="text-green-400 w-20 text-right">{c.connected_count} connected</span>
+                <span className="text-gray-500 w-16 text-right">{formatDuration(c.total_duration)}</span>
               </div>
             ))}
           </div>

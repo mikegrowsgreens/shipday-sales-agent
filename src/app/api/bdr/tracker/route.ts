@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/tracker
@@ -7,23 +8,25 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = request.nextUrl;
     const range = searchParams.get('range') || '30d';
     const from = searchParams.get('from');
     const to = searchParams.get('to');
 
-    // Parameterized date filter builder
+    // Parameterized date filter builder — startIdx allows reserving $1 for org_id
     type DateFilter = { filter: string; params: unknown[] };
 
-    function buildDateFilter(col: string): DateFilter {
+    function buildDateFilter(col: string, startIdx = 1): DateFilter {
       if (from) {
         if (to) {
           return {
-            filter: `AND ${col} >= $1::date AND ${col} <= $2::date + INTERVAL '1 day'`,
+            filter: `AND ${col} >= $${startIdx}::date AND ${col} <= $${startIdx + 1}::date + INTERVAL '1 day'`,
             params: [from, to],
           };
         }
-        return { filter: `AND ${col} >= $1::date`, params: [from] };
+        return { filter: `AND ${col} >= $${startIdx}::date`, params: [from] };
       }
       const daysMap: Record<string, number> = {
         today: 1, '7d': 7, '14d': 14, '30d': 30, '90d': 90,
@@ -31,14 +34,14 @@ export async function GET(request: NextRequest) {
       const days = daysMap[range];
       if (days) {
         return {
-          filter: `AND ${col} >= NOW() - INTERVAL '1 day' * $1`,
+          filter: `AND ${col} >= NOW() - INTERVAL '1 day' * $${startIdx}`,
           params: [days],
         };
       }
       return { filter: '', params: [] };
     }
 
-    const df = buildDateFilter('es.sent_at');
+    const df = buildDateFilter('es.sent_at', 2);
 
     // Summary stats
     const [summary] = await query<Record<string, string>>(
@@ -53,8 +56,8 @@ export async function GET(request: NextRequest) {
         ROUND(COUNT(CASE WHEN click_count > 0 THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::text as click_rate,
         ROUND(COUNT(CASE WHEN replied THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::text as reply_rate
       FROM bdr.email_sends es
-      WHERE 1=1 ${df.filter}`,
-      df.params
+      WHERE es.org_id = $1 ${df.filter}`,
+      [orgId, ...df.params]
     );
 
     // Recent email activity — sends with tracking data
@@ -66,10 +69,10 @@ export async function GET(request: NextRequest) {
              l.business_name, l.contact_name, l.tier, l.status as lead_status
       FROM bdr.email_sends es
       JOIN bdr.leads l ON l.lead_id = es.lead_id
-      WHERE 1=1 ${df.filter}
+      WHERE es.org_id = $1 ${df.filter}
       ORDER BY es.sent_at DESC
       LIMIT 100`,
-      df.params
+      [orgId, ...df.params]
     );
 
     // Angle performance for date range
@@ -82,9 +85,9 @@ export async function GET(request: NextRequest) {
         ROUND(COUNT(CASE WHEN open_count > 0 THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::text as open_rate,
         ROUND(COUNT(CASE WHEN replied THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100, 1)::text as reply_rate
       FROM bdr.email_sends es
-      WHERE 1=1 ${df.filter} AND angle IS NOT NULL
+      WHERE es.org_id = $1 ${df.filter} AND angle IS NOT NULL
       GROUP BY angle`,
-      df.params
+      [orgId, ...df.params]
     );
 
     // Daily send/open/reply trend
@@ -94,10 +97,10 @@ export async function GET(request: NextRequest) {
         COUNT(CASE WHEN open_count > 0 THEN 1 END)::text as opened,
         COUNT(CASE WHEN replied THEN 1 END)::text as replied
       FROM bdr.email_sends es
-      WHERE 1=1 ${df.filter}
+      WHERE es.org_id = $1 ${df.filter}
       GROUP BY DATE(es.sent_at)
       ORDER BY day ASC`,
-      df.params
+      [orgId, ...df.params]
     );
 
     // Recent events from email_events table
@@ -107,8 +110,10 @@ export async function GET(request: NextRequest) {
              l.business_name, l.contact_name
       FROM bdr.email_events ee
       LEFT JOIN bdr.leads l ON l.lead_id = ee.lead_id
+      WHERE ee.org_id = $1
       ORDER BY ee.event_at DESC
-      LIMIT 50`
+      LIMIT 50`,
+      [orgId]
     );
 
     return NextResponse.json({

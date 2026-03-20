@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { apiLimiter, checkRateLimit } from '@/lib/rate-limit';
+import { createBrainContentSchema, updateBrainContentSchema, deleteBrainContentSchema } from '@/lib/validators/brain';
 import crypto from 'crypto';
 
 /**
@@ -8,6 +11,8 @@ import crypto from 'crypto';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = new URL(request.url);
     const section = searchParams.get('section') || 'content';
 
@@ -33,7 +38,9 @@ export async function GET(request: NextRequest) {
                 pain_points_addressed, source_type, effective_date::text, stale_after::text,
                 is_active, created_at::text, updated_at::text
          FROM brain.internal_content
-         ORDER BY updated_at DESC`
+         WHERE org_id = $1
+         ORDER BY updated_at DESC`,
+        [orgId]
       );
       result.content = content;
     }
@@ -43,7 +50,9 @@ export async function GET(request: NextRequest) {
         const insights = await query<Record<string, unknown>>(
           `SELECT id::text, insight_type, title, summary, data::text, created_at::text
            FROM brain.performance_insights
-           ORDER BY created_at DESC LIMIT 10`
+           WHERE org_id = $1
+           ORDER BY created_at DESC LIMIT 10`,
+          [orgId]
         );
         result.insights = insights;
       } catch { result.insights = []; }
@@ -54,7 +63,9 @@ export async function GET(request: NextRequest) {
         const intel = await query<Record<string, unknown>>(
           `SELECT id::text, intel_type, title, summary, source, relevance_score, created_at::text
            FROM brain.external_intelligence
-           ORDER BY relevance_score DESC, created_at DESC LIMIT 20`
+           WHERE org_id = $1
+           ORDER BY relevance_score DESC, created_at DESC LIMIT 20`,
+          [orgId]
         );
         result.intelligence = intel;
       } catch { result.intelligence = []; }
@@ -73,18 +84,25 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { content_type, title, raw_text, key_claims, value_props, pain_points_addressed, source_type } = body;
+    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+    const rateLimitResponse = await checkRateLimit(apiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
 
-    if (!content_type || !title) {
-      return NextResponse.json({ error: 'content_type and title are required' }, { status: 400 });
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+    const body = await request.json();
+
+    const parsed = createBrainContentSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
     }
+    const { content_type, title, raw_text, key_claims, value_props, pain_points_addressed, source_type } = parsed.data;
 
     const contentHash = crypto.createHash('md5').update(`${title}:${raw_text || ''}:${Date.now()}`).digest('hex');
 
     const rows = await query<{ id: string }>(
-      `INSERT INTO brain.internal_content (content_hash, source_type, content_type, title, raw_text, key_claims, value_props, pain_points_addressed)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO brain.internal_content (content_hash, source_type, content_type, title, raw_text, key_claims, value_props, pain_points_addressed, org_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id::text`,
       [
         contentHash,
@@ -95,6 +113,7 @@ export async function POST(request: NextRequest) {
         JSON.stringify(key_claims || []),
         JSON.stringify(value_props || []),
         JSON.stringify(pain_points_addressed || []),
+        orgId,
       ]
     );
 
@@ -111,12 +130,15 @@ export async function POST(request: NextRequest) {
  */
 export async function PATCH(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
-    const { id, ...updates } = body;
 
-    if (!id) {
-      return NextResponse.json({ error: 'id is required' }, { status: 400 });
+    const parsed = updateBrainContentSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
     }
+    const { id, ...updates } = parsed.data;
 
     const fields: string[] = [];
     const params: unknown[] = [];
@@ -135,8 +157,9 @@ export async function PATCH(request: NextRequest) {
     }
 
     params.push(id);
+    params.push(orgId);
     await query(
-      `UPDATE brain.internal_content SET ${fields.join(', ')} WHERE id = $${pi}`,
+      `UPDATE brain.internal_content SET ${fields.join(', ')} WHERE id = $${pi++} AND org_id = $${pi}`,
       params
     );
 
@@ -153,14 +176,17 @@ export async function PATCH(request: NextRequest) {
  */
 export async function DELETE(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
-    const { id } = body;
 
-    if (!id) {
-      return NextResponse.json({ error: 'id is required' }, { status: 400 });
+    const parsed = deleteBrainContentSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
     }
+    const { id } = parsed.data;
 
-    await query(`DELETE FROM brain.internal_content WHERE id = $1`, [id]);
+    await query(`DELETE FROM brain.internal_content WHERE id = $1 AND org_id = $2`, [id, orgId]);
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('[brain DELETE] error:', error);

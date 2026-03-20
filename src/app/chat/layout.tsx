@@ -1,8 +1,8 @@
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'Shipday - Delivery Management Assistant',
-  description: 'Chat with our AI assistant to learn how Shipday can help your business manage deliveries more efficiently.',
+  title: 'SalesHub - AI Sales Assistant',
+  description: 'Chat with our AI assistant to learn how we can help your business grow.',
 };
 
 export default function ChatLayout({
@@ -11,7 +11,7 @@ export default function ChatLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="h-full !bg-white !text-gray-900">
+    <div className="h-full overflow-hidden !bg-white !text-gray-900">
       {children}
     </div>
   );

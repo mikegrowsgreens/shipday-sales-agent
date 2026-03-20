@@ -58,26 +58,35 @@ async function logOpen(sendId: string, request: NextRequest) {
   const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
   const userAgent = request.headers.get('user-agent') || 'unknown';
 
-  // Update email_sends counters
+  // Derive org_id from the send record for tenant scoping
+  const orgRow = await query<{ org_id: number }>(
+    `SELECT org_id FROM bdr.email_sends WHERE id = $1`,
+    [sendId]
+  );
+  const orgId = orgRow[0]?.org_id;
+  if (!orgId) return; // Unknown send record — skip silently
+
+  // Update email_sends counters (scoped to org)
   await query(
     `UPDATE bdr.email_sends
      SET open_count = open_count + 1,
          first_open_at = COALESCE(first_open_at, NOW()),
          last_open_at = NOW()
-     WHERE id = $1`,
-    [sendId]
+     WHERE id = $1 AND org_id = $2`,
+    [sendId, orgId]
   );
 
-  // Insert event record
+  // Insert event record (scoped to org)
   await query(
-    `INSERT INTO bdr.email_events (lead_id, event_type, event_at, metadata)
+    `INSERT INTO bdr.email_events (lead_id, event_type, event_at, metadata, org_id)
      SELECT es.lead_id, 'open', NOW(),
             jsonb_build_object(
               'send_id', $1,
               'ip', $2,
               'user_agent', LEFT($3, 200)
-            )
-     FROM bdr.email_sends es WHERE es.id = $1`,
-    [sendId, ip, userAgent]
+            ),
+            es.org_id
+     FROM bdr.email_sends es WHERE es.id = $1 AND es.org_id = $4`,
+    [sendId, ip, userAgent, orgId]
   );
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryShipday } from '@/lib/db';
+import { queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/followups/deals
@@ -7,6 +8,9 @@ import { queryShipday } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+    const userEmail = tenant.email;
     const { searchParams } = new URL(request.url);
     const stage = searchParams.get('stage') || '';
     const search = searchParams.get('search') || '';
@@ -14,27 +18,34 @@ export async function GET(request: NextRequest) {
     const touchProgress = searchParams.get('touch_progress') || ''; // none, started, halfway, almost_done
     const urgency = searchParams.get('urgency') || '';
     const sortBy = searchParams.get('sort') || 'next_touch'; // next_touch, last_activity, business_name, engagement
+    const showAll = searchParams.get('show_all') === 'true';
 
     let sql = `
       SELECT d.*,
-             (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id) AS draft_count,
-             (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent') AS sent_count,
-             (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'draft') AS pending_count,
-             (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'approved') AS approved_count,
-             (SELECT MAX(al.created_at) FROM shipday.activity_log al WHERE al.deal_id = d.deal_id) AS last_activity_at,
-             (SELECT al.action_type FROM shipday.activity_log al WHERE al.deal_id = d.deal_id ORDER BY al.created_at DESC LIMIT 1) AS last_activity_type,
+             (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id) AS draft_count,
+             (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent') AS sent_count,
+             (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'draft') AS pending_count,
+             (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'approved') AS approved_count,
+             (SELECT MAX(al.created_at) FROM deals.activity_log al WHERE al.deal_id = d.deal_id) AS last_activity_at,
+             (SELECT al.action_type FROM deals.activity_log al WHERE al.deal_id = d.deal_id ORDER BY al.created_at DESC LIMIT 1) AS last_activity_type,
              (SELECT json_agg(json_build_object(
                'touch_number', ed.touch_number,
                'status', ed.status,
                'sent_at', ed.sent_at,
                'scheduled_at', COALESCE(ed.scheduled_at, ed.suggested_send_time)
              ) ORDER BY ed.touch_number)
-             FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id) AS touch_summary
-      FROM shipday.deals d
-      WHERE 1=1
+             FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id) AS touch_summary
+      FROM deals.deals d
+      WHERE d.org_id = $1
     `;
-    const params: unknown[] = [];
-    let pi = 1;
+    const params: unknown[] = [orgId];
+    let pi = 2;
+
+    // Filter by owner unless show_all is requested
+    if (!showAll && userEmail) {
+      sql += ` AND d.owner_email = $${pi++}`;
+      params.push(userEmail);
+    }
 
     if (stage) {
       sql += ` AND d.pipeline_stage = $${pi++}`;
@@ -58,25 +69,25 @@ export async function GET(request: NextRequest) {
 
     // Touch progress filter (post-query sub-select)
     if (touchProgress === 'none') {
-      sql += ` AND (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id) = 0`;
+      sql += ` AND (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id) = 0`;
     } else if (touchProgress === 'started') {
-      sql += ` AND (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent') > 0
-               AND (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
-                   < (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id) * 0.5`;
+      sql += ` AND (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent') > 0
+               AND (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
+                   < (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id) * 0.5`;
     } else if (touchProgress === 'halfway') {
-      sql += ` AND (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
-                   >= (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id) * 0.5
-               AND (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
-                   < (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id)`;
+      sql += ` AND (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
+                   >= (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id) * 0.5
+               AND (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
+                   < (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id)`;
     } else if (touchProgress === 'complete') {
-      sql += ` AND (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id) > 0
-               AND (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
-                   = (SELECT COUNT(*) FROM shipday.email_drafts ed WHERE ed.deal_id = d.deal_id)`;
+      sql += ` AND (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id) > 0
+               AND (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id AND ed.status = 'sent')
+                   = (SELECT COUNT(*) FROM deals.email_drafts ed WHERE ed.deal_id = d.deal_id)`;
     }
 
     // Sort
     if (sortBy === 'last_activity') {
-      sql += ` ORDER BY (SELECT MAX(al.created_at) FROM shipday.activity_log al WHERE al.deal_id = d.deal_id) DESC NULLS LAST`;
+      sql += ` ORDER BY (SELECT MAX(al.created_at) FROM deals.activity_log al WHERE al.deal_id = d.deal_id) DESC NULLS LAST`;
     } else if (sortBy === 'business_name') {
       sql += ` ORDER BY d.business_name ASC NULLS LAST`;
     } else if (sortBy === 'engagement') {
@@ -87,7 +98,7 @@ export async function GET(request: NextRequest) {
 
     sql += ` LIMIT 100`;
 
-    const deals = await queryShipday(sql, params);
+    const deals = await queryDeals(sql, params);
 
     return NextResponse.json({ deals, total: deals.length });
   } catch (error) {

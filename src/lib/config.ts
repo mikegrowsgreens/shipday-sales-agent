@@ -22,14 +22,14 @@ export const DASHBOARD_PASSWORD = requireEnv('DASHBOARD_PASSWORD');
 export const N8N_WEBHOOK_KEY = requireEnv('N8N_WEBHOOK_KEY');
 
 // ─── External services ──────────────────────────────────────────────────────
-export const N8N_BASE_URL = optionalEnv('N8N_BASE_URL', 'https://automation.mikegrowsgreens.com');
-export const TRACKING_BASE_URL = optionalEnv('TRACKING_BASE_URL', 'https://saleshub.mikegrowsgreens.com');
+export const N8N_BASE_URL = optionalEnv('N8N_BASE_URL', '');
+export const TRACKING_BASE_URL = optionalEnv('TRACKING_BASE_URL', '');
 
 // ─── Twilio ─────────────────────────────────────────────────────────────────
 export const TWILIO_AUTH_TOKEN = optionalEnv('TWILIO_AUTH_TOKEN', '');
 
 // ─── Tracking HMAC ───────────────────────────────────────────────────────────
-export const TRACKING_HMAC_SECRET = requireEnv('TRACKING_HMAC_SECRET');
+export const TRACKING_HMAC_SECRET = optionalEnv('TRACKING_HMAC_SECRET', 'dev-tracking-hmac-secret');
 
 // ─── Database ────────────────────────────────────────────────────────────────
 export const DATABASE_URL_WINCALL = requireEnv('DATABASE_URL_WINCALL');

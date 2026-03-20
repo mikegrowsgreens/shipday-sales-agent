@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/brain/industry?industry=...
@@ -7,11 +8,14 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = new URL(request.url);
     const industry = searchParams.get('industry');
 
     const conditions = ['is_active = true'];
-    const params: unknown[] = [];
+    const params: unknown[] = [orgId];
+    conditions.push(`org_id = $${params.length}`);
 
     if (industry) {
       params.push(industry);
@@ -63,6 +67,8 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { industry, category, title, content, variables } = body;
 
@@ -74,10 +80,10 @@ export async function POST(request: NextRequest) {
     }
 
     const rows = await query<{ id: string }>(
-      `INSERT INTO brain.industry_snippets (industry, category, title, content, variables)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO brain.industry_snippets (industry, category, title, content, variables, org_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id::text`,
-      [industry, category || 'general', title, content, JSON.stringify(variables || [])]
+      [industry, category || 'general', title, content, JSON.stringify(variables || []), orgId]
     );
 
     return NextResponse.json({ id: rows[0].id, success: true });
@@ -93,6 +99,8 @@ export async function POST(request: NextRequest) {
  */
 export async function PATCH(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { id, ...updates } = body;
 
@@ -117,8 +125,9 @@ export async function PATCH(request: NextRequest) {
     }
 
     params.push(id);
+    params.push(orgId);
     await query(
-      `UPDATE brain.industry_snippets SET ${fields.join(', ')} WHERE id = $${pi}`,
+      `UPDATE brain.industry_snippets SET ${fields.join(', ')} WHERE id = $${pi++} AND org_id = $${pi}`,
       params
     );
 
@@ -135,6 +144,8 @@ export async function PATCH(request: NextRequest) {
  */
 export async function DELETE(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { id } = body;
 
@@ -142,7 +153,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'id is required' }, { status: 400 });
     }
 
-    await query(`DELETE FROM brain.industry_snippets WHERE id = $1`, [id]);
+    await query(`DELETE FROM brain.industry_snippets WHERE id = $1 AND org_id = $2`, [id, orgId]);
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('[brain/industry] DELETE error:', error);

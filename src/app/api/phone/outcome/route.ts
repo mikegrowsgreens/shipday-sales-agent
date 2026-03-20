@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
 
 /**
  * POST /api/phone/outcome - Log call outcome and trigger post-call auto-actions
@@ -9,6 +11,11 @@ import { query } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'phoneDialer');
+
     const body = await request.json();
     const { call_id, disposition, notes, duration_seconds } = body;
 
@@ -149,6 +156,9 @@ export async function POST(request: NextRequest) {
       auto_actions: autoActions,
     });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[phone/outcome] error:', error);
     return NextResponse.json({ error: 'Failed to log outcome' }, { status: 500 });
   }

@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/calls
  * List calls from public.calls with optional filters.
+ * Scoped to current tenant's org_id.
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const { searchParams } = new URL(request.url);
     const search = searchParams.get('search') || '';
     const days = parseInt(searchParams.get('days') || '30');
@@ -21,10 +26,10 @@ export async function GET(request: NextRequest) {
              action_items, topics_discussed, match_confidence
       FROM public.calls
       WHERE call_date >= NOW() - INTERVAL '1 day' * $1
-        AND owner_email = 'mike.paulus@shipday.com'
+        AND org_id = $2
     `;
-    const params: unknown[] = [days];
-    let pi = 2;
+    const params: unknown[] = [days, orgId];
+    let pi = 3;
 
     // Filter by call source type
     if (type === 'fathom') {

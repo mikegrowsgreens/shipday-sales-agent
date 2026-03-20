@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 const periodToDays: Record<string, number> = {
   '7d': 7,
@@ -13,6 +14,8 @@ const periodToDays: Record<string, number> = {
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const period = request.nextUrl.searchParams.get('period') || '30d';
     const days = periodToDays[period] || 30;
 
@@ -20,12 +23,14 @@ export async function GET(request: NextRequest) {
     const funnel = await query<{ stage: string; count: string }>(
       `SELECT lifecycle_stage AS stage, COUNT(*) AS count
        FROM crm.contacts
+       WHERE org_id = $1
        GROUP BY lifecycle_stage
        ORDER BY CASE lifecycle_stage
          WHEN 'raw' THEN 1 WHEN 'enriched' THEN 2 WHEN 'outreach' THEN 3
          WHEN 'engaged' THEN 4 WHEN 'demo_completed' THEN 5
          WHEN 'negotiation' THEN 6 WHEN 'won' THEN 7 WHEN 'lost' THEN 8
-         WHEN 'nurture' THEN 9 ELSE 10 END`
+         WHEN 'nurture' THEN 9 ELSE 10 END`,
+      [orgId]
     );
 
     // Channel performance (scoped to period)
@@ -35,10 +40,10 @@ export async function GET(request: NextRequest) {
               COUNT(*) FILTER (WHERE event_type = 'replied') AS replied,
               COUNT(*) FILTER (WHERE event_type = 'booked') AS booked
        FROM crm.touchpoints
-       WHERE occurred_at >= NOW() - INTERVAL '1 day' * $1
+       WHERE org_id = $1 AND occurred_at >= NOW() - INTERVAL '1 day' * $2
        GROUP BY channel
        ORDER BY total DESC`,
-      [days]
+      [orgId, days]
     );
 
     // Sequence performance
@@ -48,24 +53,27 @@ export async function GET(request: NextRequest) {
               COUNT(DISTINCT e.enrollment_id) FILTER (WHERE e.status = 'completed') AS completed,
               COUNT(DISTINCT e.enrollment_id) FILTER (WHERE e.status = 'replied') AS replied
        FROM crm.sequences s
-       LEFT JOIN crm.sequence_enrollments e ON e.sequence_id = s.sequence_id
+       LEFT JOIN crm.sequence_enrollments e ON e.sequence_id = s.sequence_id AND e.org_id = $1
+       WHERE s.org_id = $1
        GROUP BY s.sequence_id, s.name
-       ORDER BY enrolled DESC`
+       ORDER BY enrolled DESC`,
+      [orgId]
     );
 
     // Daily touchpoints trend (scoped to period)
     const trend = await query<{ day: string; count: string }>(
       `SELECT DATE(occurred_at) AS day, COUNT(*) AS count
        FROM crm.touchpoints
-       WHERE occurred_at >= NOW() - INTERVAL '1 day' * $1
+       WHERE org_id = $1 AND occurred_at >= NOW() - INTERVAL '1 day' * $2
        GROUP BY DATE(occurred_at)
        ORDER BY day ASC`,
-      [days]
+      [orgId, days]
     );
 
     // BDR stats
     const bdrFunnel = await query<{ status: string; count: string }>(
-      `SELECT status, COUNT(*) AS count FROM bdr.leads GROUP BY status`
+      `SELECT status, COUNT(*) AS count FROM bdr.leads WHERE org_id = $1 GROUP BY status`,
+      [orgId]
     );
 
     return NextResponse.json({ funnel, channels, sequences, trend, bdrFunnel });

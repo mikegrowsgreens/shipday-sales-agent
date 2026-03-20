@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryShipday } from '@/lib/db';
+import { queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/followups/deals/bulk-archive
@@ -7,6 +8,8 @@ import { queryShipday } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { deal_ids } = body as { deal_ids?: string[] };
 
@@ -15,15 +18,15 @@ export async function POST(request: NextRequest) {
     }
 
     const placeholders = deal_ids.map((_, i) => `$${i + 1}`).join(',');
-    const result = await queryShipday(
-      `UPDATE shipday.deals
+    const result = await queryDeals(
+      `UPDATE deals.deals
        SET agent_status = 'archived', updated_at = NOW()
        WHERE deal_id IN (${placeholders})
          AND (agent_status IS NULL OR agent_status != 'archived')`,
       deal_ids,
     );
 
-    // queryShipday returns rows for SELECT; for UPDATE we just confirm success
+    // queryDeals returns rows for SELECT; for UPDATE we just confirm success
     return NextResponse.json({
       archived: deal_ids.length,
       message: `${deal_ids.length} deals archived`,

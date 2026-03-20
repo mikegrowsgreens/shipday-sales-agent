@@ -304,7 +304,7 @@ export default function ScraperPanel() {
                   )}
                   <div className="text-gray-600">
                     Started {job.started_at ? new Date(job.started_at).toLocaleString() : '--'}
-                    {job.completed_at && ` — Completed ${new Date(job.completed_at).toLocaleString()}`}
+                    {job.completed_at && ` - Completed ${new Date(job.completed_at).toLocaleString()}`}
                   </div>
                 </div>
               )}

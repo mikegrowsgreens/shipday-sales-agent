@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { verifyTrackingToken } from '@/lib/hmac';
+import { TRACKING_BASE_URL } from '@/lib/config';
 
-const FALLBACK_URL = 'https://mikegrowsgreens.com';
+const FALLBACK_URL = TRACKING_BASE_URL || 'https://example.com';
 
 /**
  * GET /api/track/c/[id]?url={encodedUrl}&i={linkIndex}&sig={hmac}
@@ -48,17 +49,25 @@ async function logClick(sendId: string, url: string, linkIndex: string, request:
   const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
   const userAgent = request.headers.get('user-agent') || 'unknown';
 
-  // Update email_sends click counter
+  // Derive org_id from the send record for tenant scoping
+  const orgRow = await query<{ org_id: number }>(
+    `SELECT org_id FROM bdr.email_sends WHERE id = $1`,
+    [sendId]
+  );
+  const orgId = orgRow[0]?.org_id;
+  if (!orgId) return; // Unknown send record — skip silently
+
+  // Update email_sends click counter (scoped to org)
   await query(
     `UPDATE bdr.email_sends
      SET click_count = click_count + 1
-     WHERE id = $1`,
-    [sendId]
+     WHERE id = $1 AND org_id = $2`,
+    [sendId, orgId]
   );
 
-  // Insert event record
+  // Insert event record (scoped to org)
   await query(
-    `INSERT INTO bdr.email_events (lead_id, event_type, event_at, metadata)
+    `INSERT INTO bdr.email_events (lead_id, event_type, event_at, metadata, org_id)
      SELECT es.lead_id, 'click', NOW(),
             jsonb_build_object(
               'send_id', $1,
@@ -66,8 +75,9 @@ async function logClick(sendId: string, url: string, linkIndex: string, request:
               'link_index', $3,
               'ip', $4,
               'user_agent', LEFT($5, 200)
-            )
-     FROM bdr.email_sends es WHERE es.id = $1`,
-    [sendId, url, linkIndex, ip, userAgent]
+            ),
+            es.org_id
+     FROM bdr.email_sends es WHERE es.id = $1 AND es.org_id = $6`,
+    [sendId, url, linkIndex, ip, userAgent, orgId]
   );
 }

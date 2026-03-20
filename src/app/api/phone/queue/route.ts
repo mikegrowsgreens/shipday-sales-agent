@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
 
 /**
  * GET /api/phone/queue - Prioritized call queue for today
@@ -7,6 +9,11 @@ import { query } from '@/lib/db';
  */
 export async function GET() {
   try {
+    const tenant = await requireTenantSession();
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'phoneDialer');
+
     // 1. Pending call tasks (from sequences and manual)
     const taskCalls = await query<{
       source: string;
@@ -161,6 +168,9 @@ export async function GET() {
       },
     });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[phone/queue] error:', error);
     return NextResponse.json({ error: 'Failed to load call queue' }, { status: 500 });
   }

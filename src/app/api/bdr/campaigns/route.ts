@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
 
 /**
  * GET /api/bdr/campaigns
@@ -8,6 +10,11 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'campaigns');
+
     const { searchParams } = request.nextUrl;
     const status = searchParams.get('status') || 'email_ready';
     const angle = searchParams.get('angle');
@@ -16,17 +23,37 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '50');
     const offset = parseInt(searchParams.get('offset') || '0');
 
-    const conditions: string[] = ['l.status = $1'];
-    const params: (string | number)[] = [status];
-    let paramIndex = 2;
+    const conditions: string[] = ['l.status = $1', 'l.org_id = $2'];
+    const params: (string | number)[] = [status, tenant.org_id];
+    let paramIndex = 3;
 
-    // When viewing email_ready queue, exclude leads that already have sent campaign emails
-    // (i.e. they've started or completed a sequence — those are follow-ups, not first-touch)
+    // When viewing email_ready queue, exclude:
+    // 1. Leads that already have sent campaign emails (follow-ups, not first-touch)
+    // 2. Leads whose contact_email was already cold-emailed (prevents re-sending to Japonessa etc.)
+    // 3. Leads whose email domain matches a won customer in CRM (prevents emailing Zeeks etc.)
     if (status === 'email_ready') {
       conditions.push(
         `NOT EXISTS (
           SELECT 1 FROM bdr.campaign_emails ce
-          WHERE ce.lead_id = l.lead_id AND ce.status = 'sent'
+          WHERE ce.lead_id = l.lead_id AND ce.org_id = l.org_id AND ce.status = 'sent'
+        )`
+      );
+      // Exclude leads whose email was already sent via email_sends
+      conditions.push(
+        `NOT EXISTS (
+          SELECT 1 FROM bdr.email_sends es
+          WHERE es.lead_id = l.lead_id AND es.org_id = l.org_id
+        )`
+      );
+      // Exclude leads whose email domain matches a won customer in CRM
+      conditions.push(
+        `NOT EXISTS (
+          SELECT 1 FROM crm.contacts c
+          WHERE c.org_id = l.org_id
+            AND c.lifecycle_stage = 'won'
+            AND l.contact_email IS NOT NULL
+            AND SPLIT_PART(c.email, '@', 2) = SPLIT_PART(l.contact_email, '@', 2)
+            AND SPLIT_PART(l.contact_email, '@', 2) != ''
         )`
       );
     }
@@ -78,7 +105,8 @@ export async function GET(request: NextRequest) {
 
     // Get pipeline summary
     const pipeline = await query<{ status: string; count: string }>(
-      `SELECT status, COUNT(*)::text as count FROM bdr.leads GROUP BY status ORDER BY count DESC`
+      `SELECT status, COUNT(*)::text as count FROM bdr.leads WHERE org_id = $1 GROUP BY status ORDER BY count DESC`,
+      [tenant.org_id]
     );
 
     return NextResponse.json({
@@ -89,6 +117,9 @@ export async function GET(request: NextRequest) {
       pipeline: pipeline.map(r => ({ status: r.status, count: parseInt(r.count) })),
     });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[bdr-campaigns] error:', error);
     return NextResponse.json({ error: 'Failed to fetch campaigns' }, { status: 500 });
   }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/bdr/enrich/progress
@@ -7,19 +8,20 @@ import { query } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const { lead_ids } = await request.json() as { lead_ids: number[] };
     if (!lead_ids?.length) {
       return NextResponse.json({ counts: {}, leads: [] });
     }
 
-    const placeholders = lead_ids.map((_, i) => `$${i + 1}`).join(',');
-
     // Get aggregate counts
     const countRows = await query<{ status: string; count: string }>(
       `SELECT status, COUNT(*)::text as count FROM bdr.leads
-       WHERE lead_id IN (${placeholders})
+       WHERE lead_id = ANY($1) AND org_id = $2
        GROUP BY status`,
-      lead_ids,
+      [lead_ids, orgId],
     );
 
     const counts: Record<string, number> = {};
@@ -37,7 +39,7 @@ export async function POST(request: NextRequest) {
     }>(
       `SELECT lead_id, business_name, status, tier, total_score
        FROM bdr.leads
-       WHERE lead_id IN (${placeholders})
+       WHERE lead_id = ANY($1) AND org_id = $2
        ORDER BY
          CASE status
            WHEN 'scored' THEN 1
@@ -46,7 +48,7 @@ export async function POST(request: NextRequest) {
            ELSE 4
          END,
          business_name ASC`,
-      lead_ids,
+      [lead_ids, orgId],
     );
 
     return NextResponse.json({

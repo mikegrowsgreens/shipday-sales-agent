@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/templates
@@ -7,6 +8,9 @@ import { query } from '@/lib/db';
  */
 export async function GET() {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const templates = await query<{
       id: string;
       category: string;
@@ -18,8 +22,9 @@ export async function GET() {
     }>(
       `SELECT id::text, category, title, prompt, icon, sort_order, usage_count
        FROM bdr.prompt_templates
-       WHERE is_active = true
-       ORDER BY sort_order, title`
+       WHERE is_active = true AND org_id = $1
+       ORDER BY sort_order, title`,
+      [orgId]
     );
 
     return NextResponse.json({ templates });
@@ -35,6 +40,9 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { category, title, prompt, icon, sort_order } = body;
 
@@ -43,10 +51,10 @@ export async function POST(request: NextRequest) {
     }
 
     const rows = await query<{ id: string }>(
-      `INSERT INTO bdr.prompt_templates (category, title, prompt, icon, sort_order)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO bdr.prompt_templates (org_id, category, title, prompt, icon, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id::text`,
-      [category || 'general', title, prompt, icon || 'MessageSquare', sort_order || 0]
+      [orgId, category || 'general', title, prompt, icon || 'MessageSquare', sort_order || 0]
     );
 
     return NextResponse.json({ id: rows[0].id, success: true });
@@ -62,6 +70,9 @@ export async function POST(request: NextRequest) {
  */
 export async function PATCH(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { id } = body;
 
@@ -70,8 +81,8 @@ export async function PATCH(request: NextRequest) {
     }
 
     await query(
-      `UPDATE bdr.prompt_templates SET usage_count = usage_count + 1 WHERE id = $1`,
-      [id]
+      `UPDATE bdr.prompt_templates SET usage_count = usage_count + 1 WHERE id = $1 AND org_id = $2`,
+      [id, orgId]
     );
 
     return NextResponse.json({ success: true });

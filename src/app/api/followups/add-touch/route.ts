@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryShipday } from '@/lib/db';
+import { queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/followups/add-touch
@@ -8,6 +9,8 @@ import { queryShipday } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { deal_id, subject, body_plain, suggested_send_time } = body as {
       deal_id: string;
@@ -21,29 +24,29 @@ export async function POST(request: NextRequest) {
     }
 
     // Get the next touch number
-    const maxTouch = await queryShipday<{ max_touch: number }>(
-      `SELECT COALESCE(MAX(touch_number), 0) as max_touch FROM shipday.email_drafts WHERE deal_id = $1`,
+    const maxTouch = await queryDeals<{ max_touch: number }>(
+      `SELECT COALESCE(MAX(touch_number), 0) as max_touch FROM deals.email_drafts WHERE deal_id = $1`,
       [deal_id],
     );
     const nextTouchNumber = (maxTouch[0]?.max_touch || 0) + 1;
 
     // Insert the new touch
-    const result = await queryShipday<{ id: number }>(
-      `INSERT INTO shipday.email_drafts (deal_id, touch_number, subject, body_plain, suggested_send_time, status, created_at, updated_at)
+    const result = await queryDeals<{ draft_id: number }>(
+      `INSERT INTO deals.email_drafts (deal_id, touch_number, subject, body_plain, suggested_send_time, status, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, 'draft', NOW(), NOW())
-       RETURNING id`,
+       RETURNING draft_id`,
       [deal_id, nextTouchNumber, subject || '', body_plain || '', suggested_send_time || null],
     );
 
     // Log activity
-    await queryShipday(
-      `INSERT INTO shipday.activity_log (deal_id, action_type, touch_number, notes, created_at)
-       VALUES ($1, 'touch_added', $2, 'Manual touch added', NOW())`,
-      [deal_id, nextTouchNumber],
+    await queryDeals(
+      `INSERT INTO deals.activity_log (deal_id, action_type, notes, created_at)
+       VALUES ($1, 'touch_added', $2, NOW())`,
+      [deal_id, JSON.stringify({ touch_number: nextTouchNumber })],
     );
 
     return NextResponse.json({
-      id: result[0]?.id,
+      id: result[0]?.draft_id,
       touch_number: nextTouchNumber,
     });
   } catch (error) {

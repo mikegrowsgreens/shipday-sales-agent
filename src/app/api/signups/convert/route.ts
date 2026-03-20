@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/signups/convert
@@ -10,6 +11,9 @@ import { query, queryOne } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { signup_ids, stalled } = body;
 
@@ -28,12 +32,14 @@ export async function POST(request: NextRequest) {
         plan_type: string | null;
       }>(
         `SELECT signup_id, business_name, contact_name, contact_email, contact_phone, state, city, plan_type
-         FROM crm.shipday_signups
+         FROM crm.inbound_leads
          WHERE funnel_stage = 'signup'
          AND converted_to_lead = false
          AND signup_date < NOW() - INTERVAL '7 days'
          AND contact_email IS NOT NULL
-         LIMIT 100`
+         AND org_id = $1
+         LIMIT 100`,
+        [orgId]
       );
     } else if (signup_ids?.length > 0) {
       signupsToConvert = await query<{
@@ -47,10 +53,11 @@ export async function POST(request: NextRequest) {
         plan_type: string | null;
       }>(
         `SELECT signup_id, business_name, contact_name, contact_email, contact_phone, state, city, plan_type
-         FROM crm.shipday_signups
+         FROM crm.inbound_leads
          WHERE signup_id = ANY($1)
-         AND converted_to_lead = false`,
-        [signup_ids]
+         AND converted_to_lead = false
+         AND org_id = $2`,
+        [signup_ids, orgId]
       );
     } else {
       return NextResponse.json({ error: 'Provide signup_ids or stalled=true' }, { status: 400 });
@@ -101,7 +108,7 @@ export async function POST(request: NextRequest) {
       if (contact) {
         // Mark signup as converted
         await query(
-          `UPDATE crm.shipday_signups
+          `UPDATE crm.inbound_leads
            SET converted_to_lead = true, converted_to_lead_at = NOW(), contact_id = $1
            WHERE signup_id = $2`,
           [contact.contact_id, signup.signup_id]

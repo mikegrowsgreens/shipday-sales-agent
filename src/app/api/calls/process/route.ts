@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import Anthropic from '@anthropic-ai/sdk';
+import { getOrgConfigFromSession, DEFAULT_CONFIG } from '@/lib/org-config';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
+import { requireTenantSession } from '@/lib/tenant';
+import { sanitizeInput, armorSystemPrompt, wrapUserData, INPUT_LIMITS } from '@/lib/prompt-guard';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
@@ -16,17 +20,28 @@ interface TranscriptEntry {
  * Process raw call transcript(s) with Claude to extract summaries, action items,
  * topics, and coaching metrics. Saves results back to public.calls.
  *
- * Body: { call_ids?: string[] } — if omitted, processes all unprocessed calls for Mike.
+ * Body: { call_ids?: string[], all_team?: boolean } — if omitted, processes unprocessed calls for the configured owner.
+ *   Set all_team=true to process calls from all team members (needed for team-wide brain mining).
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
+    const config = await getOrgConfigFromSession().catch(() => DEFAULT_CONFIG);
+    const ownerEmail = config.persona?.sender_email || '';
+    const ownerName = config.persona?.sender_name || '';
+
     const body = await request.json().catch(() => ({}));
-    const { call_ids } = body as { call_ids?: string[] };
+    const { call_ids, all_team } = body as { call_ids?: string[]; all_team?: boolean };
 
     // Find calls to process
     let callsToProcess;
     if (call_ids?.length) {
-      const placeholders = call_ids.map((_, i) => `$${i + 1}`).join(',');
       callsToProcess = await query<{
         call_id: string;
         title: string | null;
@@ -35,11 +50,11 @@ export async function POST(request: NextRequest) {
       }>(
         `SELECT call_id, title, raw_transcript, owner_email
          FROM public.calls
-         WHERE call_id IN (${placeholders}) AND raw_transcript IS NOT NULL`,
-        call_ids,
+         WHERE call_id = ANY($1) AND raw_transcript IS NOT NULL AND org_id = $2`,
+        [call_ids, orgId],
       );
-    } else {
-      // Process all unprocessed calls for Mike
+    } else if (all_team) {
+      // Process all unprocessed calls across the entire team
       callsToProcess = await query<{
         call_id: string;
         title: string | null;
@@ -48,11 +63,30 @@ export async function POST(request: NextRequest) {
       }>(
         `SELECT call_id, title, raw_transcript, owner_email
          FROM public.calls
-         WHERE owner_email = 'mike.paulus@shipday.com'
-           AND raw_transcript IS NOT NULL
+         WHERE raw_transcript IS NOT NULL
            AND meeting_summary IS NULL
+           AND org_id = $1
          ORDER BY call_date DESC
          LIMIT 20`,
+        [orgId],
+      );
+    } else {
+      // Process unprocessed calls for the configured owner only
+      callsToProcess = await query<{
+        call_id: string;
+        title: string | null;
+        raw_transcript: TranscriptEntry[];
+        owner_email: string;
+      }>(
+        `SELECT call_id, title, raw_transcript, owner_email
+         FROM public.calls
+         WHERE owner_email = $1
+           AND raw_transcript IS NOT NULL
+           AND meeting_summary IS NULL
+           AND org_id = $2
+         ORDER BY call_date DESC
+         LIMIT 20`,
+        [ownerEmail, orgId],
       );
     }
 
@@ -79,38 +113,35 @@ export async function POST(request: NextRequest) {
           })
           .join('\n');
 
-        // Identify Mike's speaking parts for coaching metrics
-        const mikeLines = transcript.filter(
-          e => e.speaker?.display_name === 'Mike Paulus' ||
-               e.speaker?.matched_calendar_invitee_email === 'mike.paulus@shipday.com'
-        );
-        const otherLines = transcript.filter(
-          e => e.speaker?.display_name !== 'Mike Paulus' &&
-               e.speaker?.matched_calendar_invitee_email !== 'mike.paulus@shipday.com'
-        );
+        // Identify the rep's speaking parts for coaching metrics
+        const isRepSpeaker = (e: TranscriptEntry) =>
+          e.speaker?.display_name === ownerName ||
+          e.speaker?.matched_calendar_invitee_email === ownerEmail;
 
-        const mikeWordCount = mikeLines.reduce((sum, e) => sum + (e.text?.split(/\s+/).length || 0), 0);
+        const repLines = transcript.filter(isRepSpeaker);
+        const otherLines = transcript.filter(e => !isRepSpeaker(e));
+
+        const repWordCount = repLines.reduce((sum, e) => sum + (e.text?.split(/\s+/).length || 0), 0);
         const otherWordCount = otherLines.reduce((sum, e) => sum + (e.text?.split(/\s+/).length || 0), 0);
-        const totalWords = mikeWordCount + otherWordCount;
-        const talkListenRatio = totalWords > 0 ? +(mikeWordCount / totalWords).toFixed(2) : 0.5;
+        const totalWords = repWordCount + otherWordCount;
+        const talkListenRatio = totalWords > 0 ? +(repWordCount / totalWords).toFixed(2) : 0.5;
 
-        // Count Mike's questions
-        const questionCount = mikeLines.filter(e => e.text?.includes('?')).length;
+        // Count rep's questions
+        const questionCount = repLines.filter(e => e.text?.includes('?')).length;
 
         // Count filler words
         const fillerPattern = /\b(um|uh|like|you know|basically|actually|sort of|kind of)\b/gi;
-        const fillerWordCount = mikeLines.reduce((sum, e) => {
+        const fillerWordCount = repLines.reduce((sum, e) => {
           const matches = e.text?.match(fillerPattern);
           return sum + (matches?.length || 0);
         }, 0);
 
-        // Longest monologue: find consecutive Mike lines
+        // Longest monologue: find consecutive rep lines
         let longestMonologue = 0;
         let currentMonologue = 0;
         for (const entry of transcript) {
-          const isMike = entry.speaker?.display_name === 'Mike Paulus' ||
-                         entry.speaker?.matched_calendar_invitee_email === 'mike.paulus@shipday.com';
-          if (isMike) {
+          const isRep = isRepSpeaker(entry);
+          if (isRep) {
             currentMonologue += entry.text?.split(/\s+/).length || 0;
           } else {
             longestMonologue = Math.max(longestMonologue, currentMonologue);
@@ -122,19 +153,24 @@ export async function POST(request: NextRequest) {
         const longestMonologueSeconds = Math.round(longestMonologue / 2.5);
 
         // Call Claude for summary, action items, and topics
-        const response = await client.messages.create({
-          model: MODEL,
-          max_tokens: 1500,
-          system: `You are a sales call analyst. Analyze the transcript and return a JSON object with these fields:
+        const callSystemPrompt = armorSystemPrompt(`You are a sales call analyst. Analyze the transcript and return a JSON object with these fields:
 - meeting_summary: A concise 2-3 sentence summary of the call including the key discussion points and outcome.
 - action_items: An array of strings listing specific next steps or action items mentioned during the call.
 - topics_discussed: An array of short topic labels (2-4 words each) covering the main subjects discussed.
 - decisions: An array of strings listing any decisions made during the call.
 
-Return ONLY valid JSON, no markdown.`,
+Return ONLY valid JSON, no markdown.`);
+
+        const sanitizedTitle = sanitizeInput(call.title);
+        const sanitizedTranscript = sanitizeInput(formattedTranscript, INPUT_LIMITS.transcript);
+
+        const response = await client.messages.create({
+          model: MODEL,
+          max_tokens: 1500,
+          system: callSystemPrompt,
           messages: [{
             role: 'user',
-            content: `Call title: ${call.title || 'Untitled Call'}\n\nTranscript:\n${formattedTranscript.slice(0, 30000)}`,
+            content: `Call title: ${sanitizedTitle || 'Untitled Call'}\n\n${wrapUserData('transcript', sanitizedTranscript)}`,
           }],
         });
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { regenerateStep } from '@/lib/ai';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/sequences/regenerate-step
@@ -7,6 +8,9 @@ import { regenerateStep } from '@/lib/ai';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { step_type, context, instructions, surrounding_steps } = body as {
       step_type: string;

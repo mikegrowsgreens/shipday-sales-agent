@@ -1,27 +1,37 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
 
 /**
  * GET /api/coaching/velocity
- * Pipeline velocity - time-in-stage and conversion rates
+ * Pipeline velocity - time-in-stage and conversion rates.
+ * Scoped to org_id. Contact ownership not available in CRM schema.
  */
 export async function GET() {
   try {
-    // Contacts by stage with avg time in stage
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'coaching');
+
+    // Contacts by stage with avg time in stage (org-scoped)
     const stageDistribution = await query<{
       stage: string;
       count: string;
       avg_days_in_stage: string;
     }>(`
       SELECT
-        lifecycle_stage as stage,
+        c.lifecycle_stage as stage,
         COUNT(*)::text as count,
-        ROUND(AVG(EXTRACT(DAY FROM NOW() - updated_at)))::text as avg_days_in_stage
-      FROM crm.contacts
-      WHERE lifecycle_stage NOT IN ('raw')
-      GROUP BY lifecycle_stage
+        ROUND(AVG(EXTRACT(DAY FROM NOW() - c.updated_at)))::text as avg_days_in_stage
+      FROM crm.contacts c
+      WHERE c.lifecycle_stage NOT IN ('raw')
+        AND c.org_id = $1
+      GROUP BY c.lifecycle_stage
       ORDER BY
-        CASE lifecycle_stage
+        CASE c.lifecycle_stage
           WHEN 'enriched' THEN 1
           WHEN 'outreach' THEN 2
           WHEN 'engaged' THEN 3
@@ -31,29 +41,28 @@ export async function GET() {
           WHEN 'lost' THEN 7
           WHEN 'nurture' THEN 8
         END
-    `);
+    `, [orgId]);
 
-    // Stage conversion rates (last 90 days)
+    // Stage conversion rates (last 90 days, org-scoped)
     const stageTransitions = await query<{
       from_stage: string;
       to_stage: string;
       count: string;
     }>(`
-      WITH stage_order AS (
-        SELECT unnest(ARRAY['enriched','outreach','engaged','demo_completed','negotiation','won','lost','nurture']) as stage,
-               generate_series(1,8) as ord
-      )
       SELECT
         c.lifecycle_stage as to_stage,
         'all' as from_stage,
         COUNT(*)::text as count
       FROM crm.contacts c
+
       WHERE c.updated_at >= NOW() - INTERVAL '90 days'
         AND c.lifecycle_stage != 'raw'
-      GROUP BY c.lifecycle_stage
-    `);
+        AND c.org_id = $1
 
-    // Pipeline velocity: average days between key stages
+      GROUP BY c.lifecycle_stage
+    `, [orgId]);
+
+    // Pipeline velocity: average days between key stages (org-scoped)
     const velocityMetrics = await query<{
       metric: string;
       avg_days: string;
@@ -68,7 +77,10 @@ export async function GET() {
         )))::text as avg_days,
         COUNT(*)::text as count
       FROM crm.contacts c
+
       WHERE c.lifecycle_stage IN ('engaged','demo_completed','negotiation','won')
+        AND c.org_id = $1
+
         AND EXISTS (SELECT 1 FROM crm.touchpoints t WHERE t.contact_id = c.contact_id AND t.event_type IN ('replied','reply_received'))
 
       UNION ALL
@@ -81,7 +93,10 @@ export async function GET() {
         )))::text as avg_days,
         COUNT(*)::text as count
       FROM crm.contacts c
+
       WHERE c.lifecycle_stage IN ('demo_completed','negotiation','won')
+        AND c.org_id = $1
+
         AND EXISTS (SELECT 1 FROM crm.calendly_events ce WHERE ce.contact_id = c.contact_id)
 
       UNION ALL
@@ -92,10 +107,13 @@ export async function GET() {
         )))::text as avg_days,
         COUNT(*)::text as count
       FROM crm.contacts c
-      WHERE c.lifecycle_stage = 'won'
-    `);
 
-    // Bottleneck detection: stages where contacts have been sitting too long
+      WHERE c.lifecycle_stage = 'won'
+        AND c.org_id = $1
+
+    `, [orgId]);
+
+    // Bottleneck detection: stages where contacts have been sitting too long (org-scoped)
     const bottlenecks = await query<{
       stage: string;
       contact_name: string;
@@ -110,11 +128,14 @@ export async function GET() {
         EXTRACT(DAY FROM NOW() - c.updated_at)::text as days_stuck,
         c.contact_id
       FROM crm.contacts c
+
       WHERE c.lifecycle_stage IN ('engaged','demo_completed','negotiation')
         AND c.updated_at < NOW() - INTERVAL '14 days'
+        AND c.org_id = $1
+
       ORDER BY c.updated_at ASC
       LIMIT 15
-    `);
+    `, [orgId]);
 
     return NextResponse.json({
       stageDistribution,
@@ -123,6 +144,9 @@ export async function GET() {
       bottlenecks,
     });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[velocity] error:', error);
     return NextResponse.json({ error: 'Failed to load velocity data' }, { status: 500 });
   }

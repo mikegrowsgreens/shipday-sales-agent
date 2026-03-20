@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
 
 /**
  * GET /api/phone/analytics - Call analytics: volume trends, connect rates, avg duration, best times
@@ -7,6 +9,11 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'phoneDialer');
+
     const days = parseInt(request.nextUrl.searchParams.get('days') || '30');
 
     // 1. Summary stats
@@ -25,8 +32,8 @@ export async function GET(request: NextRequest) {
         COUNT(CASE WHEN disposition = 'voicemail' THEN 1 END)::int as voicemails,
         COUNT(CASE WHEN disposition = 'no-answer' THEN 1 END)::int as no_answers,
         COUNT(CASE WHEN disposition = 'meeting-booked' THEN 1 END)::int as meetings_booked,
-        COALESCE(ROUND(AVG(CASE WHEN duration_seconds > 0 THEN duration_seconds END)), 0)::int as avg_duration,
-        COALESCE(SUM(duration_seconds), 0)::int as total_duration
+        COALESCE(ROUND(AVG(CASE WHEN duration_secs > 0 THEN duration_secs END)), 0)::int as avg_duration,
+        COALESCE(SUM(duration_secs), 0)::int as total_duration
       FROM crm.phone_calls
       WHERE created_at >= NOW() - INTERVAL '1 day' * $1
     `, [days]);
@@ -114,7 +121,7 @@ export async function GET(request: NextRequest) {
         c.business_name,
         COUNT(*)::int as call_count,
         COUNT(CASE WHEN pc.disposition = 'connected' THEN 1 END)::int as connected_count,
-        COALESCE(SUM(pc.duration_seconds), 0)::int as total_duration
+        COALESCE(SUM(pc.duration_secs), 0)::int as total_duration
       FROM crm.phone_calls pc
       JOIN crm.contacts c ON c.contact_id = pc.contact_id
       WHERE pc.created_at >= NOW() - INTERVAL '1 day' * $1
@@ -152,6 +159,9 @@ export async function GET(request: NextRequest) {
       days,
     });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[phone/analytics] error:', error);
     return NextResponse.json({ error: 'Failed to load analytics' }, { status: 500 });
   }

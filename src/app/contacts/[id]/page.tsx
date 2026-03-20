@@ -1,4 +1,4 @@
-import { query, queryShipday } from '@/lib/db';
+import { query, queryDeals } from '@/lib/db';
 import { Contact, Touchpoint } from '@/lib/types';
 import Link from 'next/link';
 import {
@@ -133,20 +133,20 @@ async function getContact(id: string): Promise<ContactDetail | null> {
 
     // Post-demo deal data (if linked)
     let deal: DealInfo | null = null;
-    if (contact.shipday_deal_id) {
+    if (contact.deal_id) {
       try {
-        const dealRows = await queryShipday<{
+        const dealRows = await queryDeals<{
           deal_id: string; company_name: string | null; pipeline_stage: string | null;
           agent_status: string | null; urgency_level: string | null; demo_date: string | null;
         }>(
           `SELECT deal_id, company_name, pipeline_stage, agent_status, urgency_level, demo_date::text
-           FROM shipday.deals WHERE deal_id = $1`,
-          [contact.shipday_deal_id]
+           FROM deals WHERE deal_id = $1`,
+          [contact.deal_id]
         );
         if (dealRows.length > 0) {
-          const draftCount = await queryShipday<{ count: string }>(
-            `SELECT COUNT(*)::text as count FROM shipday.email_drafts WHERE deal_id = $1`,
-            [contact.shipday_deal_id]
+          const draftCount = await queryDeals<{ count: string }>(
+            `SELECT COUNT(*)::text as count FROM email_drafts WHERE deal_id = $1`,
+            [contact.deal_id]
           );
           deal = {
             ...dealRows[0],
@@ -338,8 +338,8 @@ export default async function ContactDetailPage({
         <div className="flex items-center gap-2 mt-4">
           <span className="text-[10px] text-gray-500 uppercase tracking-wide">Sources:</span>
           <SourceBadge label="BDR" linked={!!contact.bdr_lead_id} />
-          <SourceBadge label="Post-Demo" linked={!!contact.shipday_deal_id} />
-          <SourceBadge label="Win-Call" linked={!!contact.wincall_deal_id} />
+          <SourceBadge label="Post-Demo" linked={!!contact.deal_id} />
+          <SourceBadge label="Deals" linked={!!contact.external_deal_id} />
         </div>
 
         {/* Tags */}

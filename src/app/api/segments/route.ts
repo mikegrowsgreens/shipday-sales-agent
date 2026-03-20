@@ -1,16 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { SavedSegment, SegmentFilters, Contact } from '@/lib/types';
+import { requireTenantSession } from '@/lib/tenant';
+import { createSegmentSchema } from '@/lib/validators/settings';
 
 // GET /api/segments - List saved segments
 export async function GET() {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
   const segments = await query<SavedSegment>(
-    `SELECT * FROM crm.saved_segments ORDER BY is_default DESC, name ASC`
+    `SELECT * FROM crm.saved_segments WHERE org_id = $1 ORDER BY is_default DESC, name ASC`,
+    [orgId]
   );
 
   // Update counts
   for (const seg of segments) {
-    const where = buildSegmentWhere(seg.filters);
+    const where = buildSegmentWhere(seg.filters, orgId);
     const result = await queryOne<{ count: string }>(
       `SELECT COUNT(*)::text as count FROM crm.contacts ${where.clause}`,
       where.params
@@ -23,25 +28,27 @@ export async function GET() {
 
 // POST /api/segments - Create a saved segment
 export async function POST(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
   const body = await request.json();
-  const { name, description, filters } = body;
-
-  if (!name || !filters) {
-    return NextResponse.json({ error: 'Missing name or filters' }, { status: 400 });
+  const parsed = createSegmentSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
   }
+  const { name, description, filters } = parsed.data;
 
   // Count contacts matching this segment
-  const where = buildSegmentWhere(filters);
+  const where = buildSegmentWhere(filters as SegmentFilters, orgId);
   const countResult = await queryOne<{ count: string }>(
     `SELECT COUNT(*)::text as count FROM crm.contacts ${where.clause}`,
     where.params
   );
 
   const segment = await queryOne<SavedSegment>(
-    `INSERT INTO crm.saved_segments (name, description, filters, contact_count)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO crm.saved_segments (name, description, filters, contact_count, org_id)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,
-    [name, description || null, JSON.stringify(filters), parseInt(countResult?.count || '0')]
+    [name, description || null, JSON.stringify(filters), parseInt(countResult?.count || '0'), orgId]
   );
 
   return NextResponse.json(segment, { status: 201 });
@@ -49,18 +56,20 @@ export async function POST(request: NextRequest) {
 
 // DELETE /api/segments?id=X - Delete a saved segment
 export async function DELETE(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
   const id = request.nextUrl.searchParams.get('id');
   if (!id) return NextResponse.json({ error: 'Missing segment id' }, { status: 400 });
 
-  await query(`DELETE FROM crm.saved_segments WHERE segment_id = $1`, [parseInt(id)]);
+  await query(`DELETE FROM crm.saved_segments WHERE segment_id = $1 AND org_id = $2`, [parseInt(id), orgId]);
   return NextResponse.json({ success: true });
 }
 
 // Helper: Build WHERE clause from segment filters
-function buildSegmentWhere(filters: SegmentFilters): { clause: string; params: unknown[] } {
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+function buildSegmentWhere(filters: SegmentFilters, orgId: number): { clause: string; params: unknown[] } {
+  const conditions: string[] = [`org_id = $1`];
+  const params: unknown[] = [orgId];
+  let idx = 2;
 
   if (filters.stages?.length) {
     const placeholders = filters.stages.map((_, i) => `$${idx + i}`).join(',');
@@ -108,6 +117,6 @@ function buildSegmentWhere(filters: SegmentFilters): { clause: string; params: u
     params.push(filters.created_before);
   }
 
-  const clause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const clause = `WHERE ${conditions.join(' AND ')}`;
   return { clause, params };
 }

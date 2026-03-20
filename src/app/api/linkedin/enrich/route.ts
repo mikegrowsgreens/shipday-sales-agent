@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/linkedin/enrich
@@ -10,6 +12,9 @@ import { query, queryOne } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { contact_id, contact_ids } = body;
 
@@ -27,11 +32,11 @@ export async function POST(request: NextRequest) {
       business_name: string | null;
     }>(
       `SELECT contact_id, linkedin_url, first_name, last_name, email, business_name
-       FROM crm.contacts WHERE contact_id = ANY($1)`,
-      [ids]
+       FROM crm.contacts WHERE contact_id = ANY($1) AND org_id = $2`,
+      [ids, orgId]
     );
 
-    const n8nBaseUrl = process.env.N8N_BASE_URL || 'https://automation.mikegrowsgreens.com';
+    const n8nBaseUrl = process.env.N8N_BASE_URL || '';
     const enrichResults: { contact_id: number; status: string; data?: Record<string, unknown> }[] = [];
 
     for (const contact of contacts) {
@@ -42,7 +47,7 @@ export async function POST(request: NextRequest) {
 
       try {
         // Call n8n webhook for LinkedIn enrichment
-        const response = await fetch(`${n8nBaseUrl}/webhook/linkedin-enrich`, {
+        const response = await fetchWithTimeout(`${n8nBaseUrl}/webhook/linkedin-enrich`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -53,6 +58,7 @@ export async function POST(request: NextRequest) {
             email: contact.email,
             business_name: contact.business_name,
           }),
+          timeout: 60000,
         });
 
         const result = await response.json().catch(() => ({ status: 'triggered' }));
@@ -153,14 +159,18 @@ export async function POST(request: NextRequest) {
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+
     const contactId = request.nextUrl.searchParams.get('contact_id');
     if (!contactId) {
       return NextResponse.json({ error: 'contact_id required' }, { status: 400 });
     }
 
     const profile = await queryOne(
-      `SELECT * FROM crm.linkedin_profiles WHERE contact_id = $1`,
-      [parseInt(contactId)]
+      `SELECT lp.* FROM crm.linkedin_profiles lp
+       JOIN crm.contacts c ON c.contact_id = lp.contact_id
+       WHERE lp.contact_id = $1 AND c.org_id = $2`,
+      [parseInt(contactId), tenant.org_id]
     );
 
     return NextResponse.json({ profile: profile || null });

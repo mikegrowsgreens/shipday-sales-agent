@@ -1,3 +1,17 @@
+// ─── Newsletter Research Types ──────────────────────────────────────────────
+
+export interface NewsletterInsight {
+  id: number;
+  source_subject: string;
+  source_sender: string;
+  source_date: string;
+  insight_text: string;
+  tags: string[];
+  relevance_score: number;
+  used_in_deals: string[];
+  extracted_at: string;
+}
+
 // ─── CRM Core Types ──────────────────────────────────────────────────────────
 
 export type LifecycleStage =
@@ -13,7 +27,7 @@ export type LifecycleStage =
 
 export type Channel = 'email' | 'phone' | 'linkedin' | 'sms' | 'calendly' | 'fathom' | 'manual';
 
-export type StepType = 'email' | 'phone' | 'linkedin' | 'sms' | 'manual';
+export type StepType = 'email' | 'phone' | 'linkedin' | 'sms' | 'manual' | 'ai_chat' | 'ai_call';
 
 export type EnrollmentStatus = 'active' | 'paused' | 'completed' | 'replied' | 'booked';
 
@@ -37,8 +51,8 @@ export interface Contact {
   lead_score: number;
   engagement_score: number;
   bdr_lead_id: string | null;
-  shipday_deal_id: string | null;
-  wincall_deal_id: string | null;
+  deal_id: string | null;
+  external_deal_id: string | null;
   li_prospect_id: string | null;
   tags: string[];
   metadata: Record<string, unknown>;
@@ -268,9 +282,9 @@ export interface SmsMessage {
   created_at: string;
 }
 
-// ─── Shipday Signups ─────────────────────────────────────────────────────────
+// ─── Inbound Leads (Signups) ─────────────────────────────────────────────────
 
-export interface ShipdaySignup {
+export interface InboundLead {
   signup_id: number;
   business_name: string | null;
   contact_name: string | null;
@@ -281,7 +295,7 @@ export interface ShipdaySignup {
   city: string | null;
   phone_area_code: number | null;
   territory_match: boolean;
-  shipday_account_id: string | null;
+  external_account_id: string | null;
   signup_date: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
@@ -356,12 +370,9 @@ export type BdrLeadStatus =
   | 'hold'
   | 'bounced';
 
-export type EmailAngle =
-  | 'missed_calls'
-  | 'commission_savings'
-  | 'delivery_ops'
-  | 'tech_consolidation'
-  | 'customer_experience';
+// Email angles are now dynamic per-org via config.email_angles.
+// This type is kept for backward compatibility but angles can be any string.
+export type EmailAngle = string;
 
 export interface BdrLead {
   lead_id: string;
@@ -441,9 +452,9 @@ export interface BdrScrapingJob {
   completed_at: string | null;
 }
 
-// ─── Shipday Deal Types ─────────────────────────────────────────────────────
+// ─── Deal Types ─────────────────────────────────────────────────────────────
 
-export interface ShipdayDeal {
+export interface FollowUpDeal {
   deal_id: number;
   contact_name: string | null;
   contact_email: string | null;
@@ -474,7 +485,7 @@ export interface ShipdayDeal {
   updated_at: string;
 }
 
-export interface ShipdayEmailDraft {
+export interface FollowUpEmailDraft {
   draft_id: number;
   deal_id: number;
   touch_number: number;
@@ -504,6 +515,87 @@ export interface BrainContent {
   key_claims: string | null;
   is_active: boolean;
   effective_date: string | null;
+}
+
+// ─── Conversation Outcomes (Session 3) ──────────────────────────────────────
+
+export type ConversationTerminalState = 'in_progress' | 'demo_booked' | 'lead_captured' | 'abandoned' | 'escalated';
+
+export interface ConversationOutcome {
+  id: string;
+  conversation_id: string;
+  org_id: number;
+  started_at: string;
+  ended_at: string | null;
+  messages_count: number;
+  qualification_completeness: number;
+  demo_booked: boolean;
+  lead_captured: boolean;
+  abandonment_point: string | null;
+  terminal_state: ConversationTerminalState;
+  total_duration_seconds: number | null;
+  qualification_slots: Record<string, unknown>;
+  roi_presented: boolean;
+  objections_raised: string[];
+  effective_patterns: Array<{
+    pattern_type: string;
+    pattern_text: string;
+    effectiveness: string;
+  }>;
+  visitor_context: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+// ─── External Intelligence (Session 3) ──────────────────────────────────────
+
+export type IntelType = 'competitor_mention' | 'pricing_intel' | 'feature_request' | 'market_trend' | 'prospect_pain';
+export type IntelSourceType = 'chatbot' | 'call' | 'email' | 'manual';
+
+export interface ExternalIntelligence {
+  id: string;
+  org_id: number;
+  intel_type: IntelType;
+  source_type: IntelSourceType;
+  source_id: string | null;
+  competitor_name: string | null;
+  content: string;
+  context: Record<string, unknown>;
+  confidence: number;
+  verified: boolean;
+  verified_by: string | null;
+  verified_at: string | null;
+  created_at: string;
+}
+
+// ─── Pattern Attribution / Leaderboard (Session 3) ──────────────────────────
+
+export interface PatternAttribution {
+  id: string;
+  org_id: number;
+  pattern_id: string;
+  pattern_source: 'call_pattern' | 'auto_learned';
+  owner_email: string;
+  adopted_count: number;
+  win_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LeaderboardEntry {
+  rep_email: string;
+  total_patterns: number;
+  avg_effectiveness: number;
+  high_performer_count: number;
+  pattern_types: string;
+  ai_times_referenced: number;
+  ai_adopted_patterns: number;
+  wins_attributed: number;
+  top_pattern: {
+    type: string;
+    text: string;
+    score: number;
+  } | null;
 }
 
 // ─── AI Generation Types ────────────────────────────────────────────────────
@@ -647,6 +739,292 @@ export interface LifecycleRule {
   created_at: string;
 }
 
+// ─── Scheduling Types ───────────────────────────────────────────────────
+
+export type CalendarProvider = 'google' | 'zoom';
+
+export type SchedulingLocationType = 'google_meet' | 'zoom' | 'phone' | 'in_person' | 'custom';
+
+export type BookingStatus = 'confirmed' | 'cancelled' | 'completed' | 'no_show' | 'rescheduled';
+
+export interface CalendarConnection {
+  connection_id: number;
+  org_id: number;
+  user_id: number;
+  provider: CalendarProvider;
+  account_email: string;
+  access_token: string;
+  refresh_token: string | null;
+  token_expires_at: string | null;
+  scopes: string[];
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomQuestion {
+  type: 'text' | 'textarea' | 'select' | 'radio';
+  label: string;
+  required: boolean;
+  options?: string[];
+}
+
+export interface SchedulingEventType {
+  event_type_id: number;
+  org_id: number;
+  host_user_id: number;
+  availability_id: number | null;
+  name: string;
+  slug: string;
+  description: string | null;
+  duration_minutes: number;
+  color: string;
+  location_type: SchedulingLocationType;
+  location_value: string | null;
+  buffer_before: number;
+  buffer_after: number;
+  min_notice: number;
+  max_days_ahead: number;
+  max_per_day: number | null;
+  custom_questions: CustomQuestion[];
+  ai_agenda_enabled: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  // Joined fields
+  host_name?: string;
+  host_email?: string;
+}
+
+export interface TimeWindow {
+  start: string;  // "HH:mm"
+  end: string;    // "HH:mm"
+}
+
+export interface WeeklyHours {
+  monday: TimeWindow[];
+  tuesday: TimeWindow[];
+  wednesday: TimeWindow[];
+  thursday: TimeWindow[];
+  friday: TimeWindow[];
+  saturday: TimeWindow[];
+  sunday: TimeWindow[];
+}
+
+export interface SchedulingAvailability {
+  availability_id: number;
+  org_id: number;
+  user_id: number;
+  name: string;
+  timezone: string;
+  is_default: boolean;
+  weekly_hours: WeeklyHours;
+  date_overrides: Record<string, TimeWindow[]>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SchedulingBooking {
+  booking_id: number;
+  org_id: number;
+  event_type_id: number;
+  host_user_id: number;
+  contact_id: number | null;
+  invitee_name: string;
+  invitee_email: string;
+  invitee_phone: string | null;
+  invitee_timezone: string;
+  starts_at: string;
+  ends_at: string;
+  status: BookingStatus;
+  location_type: string;
+  meeting_url: string | null;
+  google_event_id: string | null;
+  zoom_meeting_id: string | null;
+  cancel_token: string;
+  cancel_reason: string | null;
+  rescheduled_to: number | null;
+  answers: Record<string, unknown>;
+  ai_agenda: string | null;
+  metadata: Record<string, unknown>;
+  reminder_24h_sent: boolean;
+  reminder_1h_sent: boolean;
+  created_at: string;
+  updated_at: string;
+  // Joined fields
+  event_type_name?: string;
+  host_name?: string;
+  host_email?: string;
+}
+
+export interface SchedulingWebhookLog {
+  log_id: number;
+  org_id: number;
+  booking_id: number | null;
+  event_name: string;
+  webhook_url: string;
+  request_body: Record<string, unknown> | null;
+  response_status: number | null;
+  response_body: string | null;
+  success: boolean;
+  attempted_at: string;
+}
+
+export interface AvailableSlot {
+  start: string;  // ISO 8601
+  end: string;    // ISO 8601
+}
+
+// ─── Unified Calendar Types ─────────────────────────────────────────────
+
+export type CalendarEventSource = 'google' | 'booking' | 'send';
+
+export interface UnifiedCalendarEvent {
+  id: string;
+  source: CalendarEventSource;
+  title: string;
+  description?: string;
+  start: string;       // ISO 8601
+  end: string;         // ISO 8601
+  allDay: boolean;
+  color: string;       // hex color for display
+  url?: string;        // link to event detail (booking page, Google Calendar, etc.)
+  meetingUrl?: string;  // Google Meet / Zoom link
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+// ─── Customer Hub Types ─────────────────────────────────────────────────────
+
+export type CustomerAccountStatus = 'active' | 'inactive' | 'churned' | 'suspended' | 'deleted';
+
+export type CustomerCampaignType =
+  | 'upsell'
+  | 'retention'
+  | 'winback'
+  | 'feature_adoption'
+  | 'review_request'
+  | 'announcement';
+
+export type CustomerCampaignStatus = 'draft' | 'active' | 'paused' | 'completed';
+
+export type CampaignSendStatus = 'draft' | 'approved' | 'scheduled' | 'sent' | 'delivered' | 'opened' | 'replied' | 'bounced';
+
+export interface Customer {
+  id: number;
+  org_id: number;
+  business_name: string;
+  contact_name: string | null;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  shipday_company_id: number | null;
+  shipday_account_id: string | null;
+  account_plan: string | null;
+  plan_display_name: string | null;
+  account_status: CustomerAccountStatus;
+  signup_date: string | null;
+  last_active: string | null;
+  num_locations: number | null;
+  num_drivers: number | null;
+  avg_completed_orders: number | null;
+  avg_order_value: number | null;
+  avg_cost_per_order: number | null;
+  discount_pct: number | null;
+  health_score: number;
+  last_email_date: string | null;
+  last_email_subject: string | null;
+  total_emails: number;
+  notes: string | null;
+  tags: string[];
+  custom_fields: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  imported_from: string | null;
+}
+
+export interface CustomerEmail {
+  id: number;
+  org_id: number;
+  customer_id: number;
+  gmail_message_id: string | null;
+  gmail_thread_id: string | null;
+  direction: 'inbound' | 'outbound';
+  from_email: string | null;
+  to_email: string | null;
+  subject: string | null;
+  snippet: string | null;
+  body_preview: string | null;
+  date: string | null;
+  labels: string[];
+  has_attachment: boolean;
+  created_at: string;
+}
+
+export interface CustomerPlanChange {
+  id: number;
+  org_id: number;
+  customer_id: number;
+  previous_plan: string | null;
+  new_plan: string | null;
+  change_type: string | null;
+  change_date: string | null;
+  commission: number | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface CustomerCampaign {
+  id: number;
+  org_id: number;
+  name: string;
+  campaign_type: CustomerCampaignType | null;
+  target_segment: Record<string, unknown>;
+  subject_template: string | null;
+  body_template: string | null;
+  status: CustomerCampaignStatus;
+  total_recipients: number;
+  sent_count: number;
+  open_count: number;
+  reply_count: number;
+  conversion_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerCampaignSend {
+  id: number;
+  org_id: number;
+  campaign_id: number;
+  customer_id: number | null;
+  to_email: string;
+  subject: string | null;
+  body: string | null;
+  personalization_context: Record<string, unknown>;
+  status: CampaignSendStatus;
+  scheduled_for: string | null;
+  sent_at: string | null;
+  opened_at: string | null;
+  replied_at: string | null;
+  gmail_message_id: string | null;
+  gmail_thread_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerStats {
+  total_active: number;
+  total_inactive: number;
+  total_churned: number;
+  by_plan: Record<string, number>;
+  avg_health_score: number;
+  avg_order_value: number;
+  total_locations: number;
+  at_risk_count: number;
+}
+
 // ─── Activity Feed ──────────────────────────────────────────────────────────
 
 export interface ActivityFeedItem {
@@ -660,4 +1038,102 @@ export interface ActivityFeedItem {
   subject: string | null;
   body_preview: string | null;
   occurred_at: string;
+}
+
+// ─── Voice Agent Types ──────────────────────────────────────────────────────
+
+// ─── Campaign Integration Types (Session 9) ─────────────────────────────────
+
+/** Context passed from campaign email links to chatbot/voice agent */
+export interface CampaignContext {
+  campaign_template_id: number;
+  campaign_step: number;
+  lead_id: number;
+  tier: string | null;
+  angle: string | null;
+  variant: string | null;
+  business_name: string | null;
+  contact_name: string | null;
+  contact_email: string | null;
+  source_channel: 'email' | 'sms';
+}
+
+/** Warm lead with cross-touchpoint scoring */
+export interface WarmLead {
+  lead_id: number;
+  contact_id: number | null;
+  business_name: string | null;
+  contact_name: string | null;
+  contact_email: string | null;
+  phone: string | null;
+  tier: string | null;
+  warmth_score: number;
+  warmth_signals: WarmthSignal[];
+  last_activity_at: string;
+  recommended_action: 'ai_call' | 'human_call' | 'ai_chat' | 'email_followup';
+  qualification_data: Record<string, unknown>;
+}
+
+export interface WarmthSignal {
+  signal_type: 'email_opened' | 'email_clicked' | 'email_replied' | 'chat_started' | 'chat_qualified' | 'chat_demo_booked' | 'voice_completed' | 'voice_qualified' | 'multi_open' | 'link_clicked';
+  count: number;
+  last_at: string;
+  weight: number;
+}
+
+/** Campaign step execution for ai_chat and ai_call channels */
+export interface CampaignAIStepExecution {
+  id: number;
+  campaign_email_id: number;
+  lead_id: number;
+  channel: 'ai_chat' | 'ai_call';
+  status: 'pending' | 'link_sent' | 'chat_started' | 'call_initiated' | 'completed' | 'no_response' | 'failed';
+  tracking_token: string;
+  campaign_context: CampaignContext;
+  conversation_id: string | null;
+  call_sid: string | null;
+  outcome: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ─── Voice Agent Types ──────────────────────────────────────────────────────
+
+export type VoiceCallStatus = 'initiated' | 'in_progress' | 'completed' | 'transferred' | 'failed' | 'voicemail';
+
+export type VoiceStage =
+  | 'greeting'
+  | 'hook'
+  | 'rapport'
+  | 'discovery'
+  | 'implication'
+  | 'solution_mapping'
+  | 'roi_crystallization'
+  | 'commitment'
+  | 'close'
+  | 'handoff'
+  | 'ended';
+
+export interface VoiceAgentCall {
+  id: number;
+  call_sid: string;
+  session_id: string;
+  contact_id: number | null;
+  org_id: number | null;
+  direction: 'inbound' | 'outbound';
+  status: VoiceCallStatus;
+  duration_seconds: number;
+  messages_count: number;
+  transcript: string | null;
+  qualification_slots: Record<string, unknown>;
+  computed_roi: string | null;
+  final_stage: VoiceStage | null;
+  handoff_triggered: boolean;
+  handoff_reason: string | null;
+  started_at: string;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
 }

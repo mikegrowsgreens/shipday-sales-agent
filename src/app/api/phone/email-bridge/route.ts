@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 import Anthropic from '@anthropic-ai/sdk';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
+import { sanitizeInput, armorSystemPrompt, wrapUserData, buildDataSection, INPUT_LIMITS, validateEmailOutput } from '@/lib/prompt-guard';
 
 /**
  * POST /api/phone/email-bridge - Generate follow-up email from call notes + brain context
@@ -8,6 +11,13 @@ import Anthropic from '@anthropic-ai/sdk';
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { call_id, contact_id } = body;
 
@@ -22,9 +32,9 @@ export async function POST(request: NextRequest) {
       created_at: string;
     }>(
       call_id
-        ? `SELECT call_id, contact_id, disposition, duration_seconds, notes, created_at FROM crm.phone_calls WHERE call_id = $1`
-        : `SELECT call_id, contact_id, disposition, duration_seconds, notes, created_at FROM crm.phone_calls WHERE contact_id = $1 ORDER BY created_at DESC LIMIT 1`,
-      [call_id || contact_id]
+        ? `SELECT call_id, contact_id, disposition, duration_seconds, notes, created_at FROM crm.phone_calls WHERE call_id = $1 AND org_id = $2`
+        : `SELECT call_id, contact_id, disposition, duration_seconds, notes, created_at FROM crm.phone_calls WHERE contact_id = $1 AND org_id = $2 ORDER BY created_at DESC LIMIT 1`,
+      [call_id || contact_id, orgId]
     );
 
     if (callRows.length === 0) {
@@ -39,8 +49,8 @@ export async function POST(request: NextRequest) {
       lifecycle_stage: string; title: string | null;
     }>(
       `SELECT first_name, last_name, business_name, email, lifecycle_stage, title
-       FROM crm.contacts WHERE contact_id = $1`,
-      [call.contact_id]
+       FROM crm.contacts WHERE contact_id = $1 AND org_id = $2`,
+      [call.contact_id, orgId]
     );
 
     if (contactRows.length === 0) {
@@ -52,33 +62,47 @@ export async function POST(request: NextRequest) {
     const brainContent = await query<{ content_type: string; raw_text: string }>(
       `SELECT content_type, raw_text
        FROM brain.internal_content
-       WHERE is_active = true AND content_type IN ('value_prop_intelligence', 'deal_intelligence')
-       ORDER BY updated_at DESC LIMIT 2`
+       WHERE is_active = true AND content_type IN ('value_prop_intelligence', 'deal_intelligence') AND org_id = $1
+       ORDER BY updated_at DESC LIMIT 2`,
+      [orgId]
     );
 
     const contactName = contact.first_name || 'there';
-    const brainContext = brainContent.map(b => b.raw_text.substring(0, 400)).join('\n\n');
+    const brainContext = brainContent.map(b => sanitizeInput(b.raw_text, 400)).join('\n\n');
+
+    const emailBridgeSystem = armorSystemPrompt(
+      `You are a professional sales assistant. Generate a concise follow-up email after a phone call. Return valid JSON only.`
+    );
+
+    const contactData = buildDataSection({
+      'Contact': sanitizeInput(`${contactName} ${contact.last_name || ''}`),
+      'Company': sanitizeInput(contact.business_name),
+      'Title': sanitizeInput(contact.title),
+      'Stage': contact.lifecycle_stage,
+    });
+
+    const callData = buildDataSection({
+      'Disposition': call.disposition || 'connected',
+      'Duration': call.duration_seconds ? Math.floor(call.duration_seconds / 60) + ' minutes' : 'unknown',
+      'Notes': sanitizeInput(call.notes, INPUT_LIMITS.context),
+      'Date': new Date(call.created_at).toLocaleDateString(),
+    });
 
     const anthropic = new Anthropic();
     const response = await anthropic.messages.create({
       model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929',
       max_tokens: 800,
+      system: emailBridgeSystem,
       messages: [{
         role: 'user',
         content: `Generate a follow-up email after a phone call. Keep it concise and professional.
 
-CONTACT: ${contactName} ${contact.last_name || ''} at ${contact.business_name || 'their company'}
-Title: ${contact.title || 'Unknown'}
-Stage: ${contact.lifecycle_stage}
+${contactData}
 
 CALL DETAILS:
-- Disposition: ${call.disposition || 'connected'}
-- Duration: ${call.duration_seconds ? Math.floor(call.duration_seconds / 60) + ' minutes' : 'unknown'}
-- Notes: ${call.notes || 'No notes recorded'}
-- Date: ${new Date(call.created_at).toLocaleDateString()}
+${callData}
 
-BUSINESS CONTEXT:
-${brainContext}
+${wrapUserData('business_context', brainContext)}
 
 Generate a JSON response:
 {
@@ -96,6 +120,13 @@ Generate a JSON response:
     }
 
     const email = JSON.parse(jsonMatch[0]);
+
+    // Validate AI output
+    const validation = validateEmailOutput(email);
+    if (!validation.valid) {
+      console.error('[phone/email-bridge] output validation failed:', validation.reason);
+      return NextResponse.json({ error: 'Generated email failed validation' }, { status: 500 });
+    }
 
     return NextResponse.json({
       subject: email.subject,

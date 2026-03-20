@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
@@ -12,6 +13,7 @@ import {
   GitBranch,
   Headphones,
   GraduationCap,
+  BookOpen,
   MapPin,
   BarChart3,
   Zap,
@@ -22,7 +24,16 @@ import {
   Inbox,
   Users,
   Activity,
+  Crown,
+  Megaphone,
+  CalendarDays,
+  Mail,
+  Menu,
+  X,
+  Globe,
+  LogOut,
 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 
 interface NavSection {
   label: string;
@@ -45,6 +56,7 @@ const navSections: NavSection[] = [
       { href: '/contacts', label: 'Contacts', icon: Users },
       { href: '/queue', label: 'Action Queue', icon: ListTodo },
       { href: '/activity', label: 'Activity Feed', icon: Activity },
+      { href: '/calendar', label: 'Calendar', icon: CalendarDays },
     ],
   },
   {
@@ -54,6 +66,7 @@ const navSections: NavSection[] = [
       { href: '/sequences/templates', label: 'Templates', icon: Bookmark },
       { href: '/outbound', label: 'Outbound', icon: Target },
       { href: '/followups', label: 'Follow-Ups', icon: GitBranch },
+      { href: '/scraper', label: 'Lead Scraper', icon: Globe },
     ],
   },
   {
@@ -63,6 +76,14 @@ const navSections: NavSection[] = [
       { href: '/assistant', label: 'BDR Assistant', icon: Bot },
       { href: '/calls', label: 'Phone Agent', icon: Headphones },
       { href: '/coaching', label: 'Coaching & Intel', icon: GraduationCap },
+      { href: '/research', label: 'Research Library', icon: BookOpen },
+    ],
+  },
+  {
+    label: 'CUSTOMERS',
+    items: [
+      { href: '/customers', label: 'Customer Hub', icon: Crown },
+      { href: '/customers/campaigns', label: 'Campaigns', icon: Megaphone },
     ],
   },
   {
@@ -72,29 +93,64 @@ const navSections: NavSection[] = [
     ],
   },
   {
+    label: 'EMAIL TRACKING',
+    items: [
+      { href: '/email-tracking', label: 'Tracked Emails', icon: Mail },
+    ],
+  },
+  {
     label: 'ANALYTICS',
     items: [
       { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+      { href: '/agent-analytics', label: 'Agent Analytics', icon: Bot },
     ],
   },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.push('/login');
+  };
+
+  // Close mobile sidebar on route change
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
+  // Prevent body scroll when mobile sidebar is open
+  useEffect(() => {
+    if (mobileOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => { document.body.style.overflow = ''; };
+  }, [mobileOpen]);
 
   if (pathname === '/login' || pathname === '/chat') return null;
 
-  return (
-    <aside className="w-64 border-r border-gray-800 bg-gray-900 flex flex-col shrink-0">
+  const sidebarContent = (
+    <>
       {/* Header */}
-      <div className="p-5 border-b border-gray-800">
+      <div className="p-5 border-b border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Zap className="w-5 h-5 text-blue-400" />
           <div>
-            <h1 className="text-lg font-semibold text-white">Shipday</h1>
-            <p className="text-xs text-gray-400 -mt-0.5">Sales Hub</p>
+            <h1 className="text-lg font-semibold text-white">SalesHub</h1>
+            <p className="text-xs text-gray-400 -mt-0.5">CRM Platform</p>
           </div>
         </div>
+        <button
+          onClick={() => setMobileOpen(false)}
+          className="lg:hidden p-1.5 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+        >
+          <X className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Navigation */}
@@ -145,11 +201,58 @@ export function Sidebar() {
           <Settings className="w-4 h-4" />
           Settings
         </Link>
+        <button
+          onClick={handleLogout}
+          className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-red-600/20 hover:text-red-400 transition-colors w-full"
+        >
+          <LogOut className="w-4 h-4" />
+          Log Out
+        </button>
         <div className="flex items-center gap-2 px-3 py-2 text-xs text-gray-500">
           <BarChart3 className="w-3.5 h-3.5" />
           <span>v3.0 - Full Suite</span>
         </div>
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Mobile top bar with hamburger */}
+      <div className="lg:hidden fixed top-0 left-0 right-0 z-40 h-14 bg-gray-900 border-b border-gray-800 flex items-center px-4 gap-3">
+        <button
+          onClick={() => setMobileOpen(true)}
+          className="p-1.5 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+        <Zap className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-semibold text-white">SalesHub</span>
+      </div>
+
+      {/* Mobile spacer so content isn't hidden behind the top bar */}
+      <div className="lg:hidden h-14 shrink-0" />
+
+      {/* Mobile overlay backdrop */}
+      {mobileOpen && (
+        <div
+          className="lg:hidden fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
+      {/* Sidebar — desktop: static, mobile: slide-over */}
+      <aside
+        className={cn(
+          'w-64 border-r border-gray-800 bg-gray-900 flex flex-col shrink-0',
+          // Desktop: always visible in normal flow
+          'hidden lg:flex',
+          // Mobile: fixed overlay that slides in/out
+          mobileOpen && '!flex fixed inset-y-0 left-0 z-50 shadow-2xl'
+        )}
+      >
+        {sidebarContent}
+      </aside>
+    </>
   );
 }

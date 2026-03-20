@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/linkedin - Trigger LinkedIn automation via n8n
@@ -10,6 +12,9 @@ import { query, queryOne } from '@/lib/db';
  * Body: { contact_id, action: 'connect' | 'message' | 'view', message?, task_id? }
  */
 export async function POST(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
+
   const body = await request.json();
   const { contact_id, action = 'message', message, task_id } = body;
 
@@ -26,20 +31,20 @@ export async function POST(request: NextRequest) {
     business_name: string | null;
   }>(
     `SELECT contact_id, linkedin_url, first_name, last_name, email, business_name
-     FROM crm.contacts WHERE contact_id = $1`,
-    [contact_id]
+     FROM crm.contacts WHERE contact_id = $1 AND org_id = $2`,
+    [contact_id, orgId]
   );
 
   if (!contact) {
     return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
   }
 
-  const n8nBaseUrl = process.env.N8N_BASE_URL || 'https://automation.mikegrowsgreens.com';
+  const n8nBaseUrl = process.env.N8N_BASE_URL || '';
   const n8nWebhookPath = process.env.N8N_LINKEDIN_WEBHOOK || '/webhook/linkedin-step';
 
   try {
     // Call n8n webhook to trigger LinkedIn automation
-    const response = await fetch(`${n8nBaseUrl}${n8nWebhookPath}`, {
+    const response = await fetchWithTimeout(`${n8nBaseUrl}${n8nWebhookPath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -53,6 +58,7 @@ export async function POST(request: NextRequest) {
         message: message || null,
         task_id: task_id || null,
       }),
+      timeout: 30000,
     });
 
     const result = await response.json().catch(() => ({ status: 'triggered' }));

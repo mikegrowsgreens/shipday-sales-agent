@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { Contact } from '@/lib/types';
+import { withAuth } from '@/lib/route-auth';
 
 // POST /api/contacts/enrich - Enrich contact data from available sources
-export async function POST(request: NextRequest) {
+export const POST = withAuth(async (request: NextRequest, { orgId }) => {
   const body = await request.json();
   const { contact_id } = body;
 
@@ -12,7 +13,7 @@ export async function POST(request: NextRequest) {
   }
 
   const contact = await queryOne<Contact>(
-    `SELECT * FROM crm.contacts WHERE contact_id = $1`, [contact_id]
+    `SELECT * FROM crm.contacts WHERE contact_id = $1 AND org_id = $2`, [contact_id, orgId]
   );
 
   if (!contact) {
@@ -28,8 +29,8 @@ export async function POST(request: NextRequest) {
       const lead = await queryOne<Record<string, unknown>>(
         `SELECT business_name, contact_name, contact_email, phone, city, state,
                 website, cuisine_type, google_rating, google_review_count, tier, total_score
-         FROM bdr.leads WHERE lead_id = $1`,
-        [contact.bdr_lead_id]
+         FROM bdr.leads WHERE lead_id = $1 AND org_id = $2`,
+        [contact.bdr_lead_id, orgId]
       );
       if (lead) {
         if (!contact.website && lead.website) enriched.website = lead.website;
@@ -63,8 +64,8 @@ export async function POST(request: NextRequest) {
     `SELECT COUNT(*)::text as total,
             COUNT(CASE WHEN event_type = 'replied' THEN 1 END)::text as replies,
             COUNT(CASE WHEN event_type = 'opened' THEN 1 END)::text as opens
-     FROM crm.touchpoints WHERE contact_id = $1`,
-    [contact_id]
+     FROM crm.touchpoints WHERE contact_id = $1 AND org_id = $2`,
+    [contact_id, orgId]
   );
 
   if (engagement) {
@@ -96,30 +97,30 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    values.push(contact_id);
+    values.push(contact_id, orgId);
     await query(
-      `UPDATE crm.contacts SET ${sets.join(', ')} WHERE contact_id = $${idx}`,
+      `UPDATE crm.contacts SET ${sets.join(', ')} WHERE contact_id = $${idx} AND org_id = $${idx + 1}`,
       values
     );
 
     // Update stage if still raw
     if (contact.lifecycle_stage === 'raw' && Object.keys(enriched).length > 1) {
       await query(
-        `UPDATE crm.contacts SET lifecycle_stage = 'enriched' WHERE contact_id = $1 AND lifecycle_stage = 'raw'`,
-        [contact_id]
+        `UPDATE crm.contacts SET lifecycle_stage = 'enriched' WHERE contact_id = $1 AND lifecycle_stage = 'raw' AND org_id = $2`,
+        [contact_id, orgId]
       );
     }
 
     // Log enrichment touchpoint
     await query(
-      `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, subject, occurred_at)
-       VALUES ($1, 'manual', 'enriched', 'outbound', 'saleshub', $2, NOW())`,
-      [contact_id, `Enriched from: ${sources.join(', ')}`]
+      `INSERT INTO crm.touchpoints (contact_id, channel, event_type, direction, source_system, subject, occurred_at, org_id)
+       VALUES ($1, 'manual', 'enriched', 'outbound', 'saleshub', $2, NOW(), $3)`,
+      [contact_id, `Enriched from: ${sources.join(', ')}`, orgId]
     );
   }
 
   const updated = await queryOne<Contact>(
-    `SELECT * FROM crm.contacts WHERE contact_id = $1`, [contact_id]
+    `SELECT * FROM crm.contacts WHERE contact_id = $1 AND org_id = $2`, [contact_id, orgId]
   );
 
   return NextResponse.json({
@@ -127,4 +128,4 @@ export async function POST(request: NextRequest) {
     enriched_fields: Object.keys(enriched),
     sources,
   });
-}
+});

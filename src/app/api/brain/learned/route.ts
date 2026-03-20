@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/brain/learned
@@ -7,11 +8,14 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = new URL(request.url);
     const patternType = searchParams.get('pattern_type');
 
     const conditions = ['is_active = true'];
-    const params: unknown[] = [];
+    const params: unknown[] = [orgId];
+    conditions.push(`org_id = $${params.length}`);
 
     if (patternType) {
       params.push(patternType);
@@ -54,6 +58,8 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { source_type, source_id, pattern_type, content, context, confidence } = body;
 
@@ -65,8 +71,8 @@ export async function POST(request: NextRequest) {
     }
 
     const rows = await query<{ id: string }>(
-      `INSERT INTO brain.auto_learned (source_type, source_id, pattern_type, content, context, confidence)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO brain.auto_learned (source_type, source_id, pattern_type, content, context, confidence, org_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id::text`,
       [
         source_type || 'manual',
@@ -75,6 +81,7 @@ export async function POST(request: NextRequest) {
         content,
         JSON.stringify(context || {}),
         confidence || 0.5,
+        orgId,
       ]
     );
 
@@ -91,6 +98,8 @@ export async function POST(request: NextRequest) {
  */
 export async function DELETE(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { id } = body;
 
@@ -98,7 +107,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'id is required' }, { status: 400 });
     }
 
-    await query(`UPDATE brain.auto_learned SET is_active = false WHERE id = $1`, [id]);
+    await query(`UPDATE brain.auto_learned SET is_active = false WHERE id = $1 AND org_id = $2`, [id, orgId]);
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('[brain/learned] DELETE error:', error);

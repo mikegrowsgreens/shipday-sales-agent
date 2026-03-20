@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getTenantFromSession } from '@/lib/tenant';
+import { requireTenantSession } from '@/lib/tenant';
+import { exportSettingsSchema } from '@/lib/validators/settings';
 
 /**
  * POST /api/settings/export
@@ -9,46 +10,89 @@ import { getTenantFromSession } from '@/lib/tenant';
  */
 export async function POST(request: NextRequest) {
   try {
-    const tenant = await getTenantFromSession();
-    const orgId = tenant?.org_id || 1;
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
 
     const body = await request.json();
-    const { format, tables } = body as {
-      format: 'json' | 'csv';
-      tables: string[];
-    };
-
-    if (!format || !tables?.length) {
-      return NextResponse.json({ error: 'format and tables required' }, { status: 400 });
+    const parsed = exportSettingsSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
     }
+    const { format, tables } = parsed.data;
 
-    const allowedTables: Record<string, { schema: string; table: string; orgCol?: string }> = {
+    const allowedTables: Record<string, {
+      schema: string;
+      table: string;
+      orgCol?: string;
+      /** Custom SELECT columns (omit to use SELECT *) */
+      selectCols?: string;
+      /** Custom query override — must include $1 placeholder for orgId */
+      customQuery?: string;
+    }> = {
       contacts: { schema: 'crm', table: 'contacts', orgCol: 'org_id' },
       deals: { schema: 'crm', table: 'deals', orgCol: 'org_id' },
       activities: { schema: 'crm', table: 'activities', orgCol: 'org_id' },
-      sequences: { schema: 'public', table: 'sequences' },
-      campaigns: { schema: 'bdr', table: 'lead_campaigns' },
-      leads: { schema: 'bdr', table: 'leads' },
-      brain: { schema: 'brain', table: 'internal_content' },
+      sequences: { schema: 'crm', table: 'sequences', orgCol: 'org_id' },
+      campaigns: { schema: 'bdr', table: 'lead_campaigns', orgCol: 'org_id' },
+      leads: { schema: 'bdr', table: 'leads', orgCol: 'org_id' },
+      brain: { schema: 'brain', table: 'internal_content', orgCol: 'org_id' },
+      // GDPR-required tables
+      touchpoints: { schema: 'crm', table: 'touchpoints', orgCol: 'org_id' },
+      sequence_enrollments: { schema: 'crm', table: 'sequence_enrollments', orgCol: 'org_id' },
+      sequence_step_executions: {
+        schema: 'crm',
+        table: 'sequence_step_executions',
+        customQuery: `SELECT sse.* FROM crm.sequence_step_executions sse
+          INNER JOIN crm.sequence_enrollments se ON se.id = sse.enrollment_id
+          WHERE se.org_id = $1
+          ORDER BY sse.created_at DESC LIMIT 10000`,
+      },
+      task_queue: { schema: 'crm', table: 'task_queue', orgCol: 'org_id' },
+      audit_log: { schema: 'crm', table: 'audit_log', orgCol: 'org_id' },
+      usage_events: { schema: 'crm', table: 'usage_events', orgCol: 'org_id' },
+      api_keys: {
+        schema: 'crm',
+        table: 'api_keys',
+        orgCol: 'org_id',
+        selectCols: 'id, org_id, name, prefix, scopes, expires_at, last_used_at, created_at, revoked_at',
+      },
     };
 
     const exportData: Record<string, unknown[]> = {};
 
-    for (const tableName of tables) {
+    // Support "all" — export every allowed table
+    const requestedTables = tables.includes('all')
+      ? Object.keys(allowedTables)
+      : tables;
+
+    for (const tableName of requestedTables) {
       const config = allowedTables[tableName];
       if (!config) continue;
 
-      const whereClause = config.orgCol
-        ? `WHERE ${config.orgCol} = $1`
-        : '';
-      const params = config.orgCol ? [orgId] : [];
+      let sql: string;
+      let params: unknown[];
 
-      const rows = await query(
-        `SELECT * FROM ${config.schema}.${config.table} ${whereClause} ORDER BY created_at DESC LIMIT 10000`,
-        params
-      );
+      if (config.customQuery) {
+        // Table requires a custom query (e.g. join-based org scoping)
+        sql = config.customQuery;
+        params = [orgId];
+      } else {
+        const cols = config.selectCols || '*';
+        const whereClause = config.orgCol
+          ? `WHERE ${config.orgCol} = $1`
+          : '';
+        params = config.orgCol ? [orgId] : [];
+        sql = `SELECT ${cols} FROM ${config.schema}.${config.table} ${whereClause} ORDER BY created_at DESC LIMIT 10000`;
+      }
 
-      exportData[tableName] = rows;
+      try {
+        const rows = await query(sql, params);
+        exportData[tableName] = rows;
+      } catch (tableError) {
+        // Log but don't fail the entire export if one table is missing
+        console.warn(`[settings/export] skipping table "${tableName}":`, tableError);
+        exportData[tableName] = [];
+      }
     }
 
     if (format === 'json') {

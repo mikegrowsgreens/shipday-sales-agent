@@ -33,8 +33,8 @@ export default function CampaignFilters({
 }: CampaignFiltersProps) {
   // Show "Generate Campaigns" when viewing enriched/scored leads
   const showGenerateAll = ['enriched', 'scored'].includes(status) && totalCount > 0;
-  // Show "Regenerate All" when viewing email_ready leads
-  const showRegenAll = status === 'email_ready' && totalCount > 0;
+  // Show "Regenerate All" on any status with leads (not just email_ready)
+  const showRegenAll = totalCount > 0 && !['enriched', 'scored'].includes(status);
 
   return (
     <div className="space-y-3">
@@ -151,7 +151,7 @@ export default function CampaignFilters({
               className="flex items-center gap-1.5 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 text-xs px-3 py-1 rounded-lg transition-colors disabled:opacity-50"
             >
               <RefreshCw className="w-3 h-3" />
-              {bulkRegenerating ? `Regenerating ${totalCount}...` : `Regenerate All (${totalCount})`}
+              {bulkRegenerating ? `Regenerating...` : `Regenerate All (${totalCount})`}
             </button>
           </>
         )}

@@ -1,6 +1,10 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 import Anthropic from '@anthropic-ai/sdk';
+import { getOrgConfigFromSession, DEFAULT_CONFIG } from '@/lib/org-config';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
+import { sanitizeInput, armorSystemPrompt, wrapUserData } from '@/lib/prompt-guard';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -8,8 +12,15 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  * POST /api/tasks/daily-plan
  * AI generates a prioritized daily action plan
  */
-export async function POST() {
+export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     // Gather all inputs for the daily plan
     const [
       pendingTasks,
@@ -153,15 +164,26 @@ export async function POST() {
       tasks_completed_today: parseInt(todayTasks[0]?.cnt || '0'),
     };
 
+    const config = await getOrgConfigFromSession().catch(() => DEFAULT_CONFIG);
+    const repName = config.persona?.sender_name || 'the sales rep';
+    const companyName = config.company_name || 'SalesHub';
+
+    const sanitizedRepName = sanitizeInput(repName);
+    const sanitizedCompanyName = sanitizeInput(companyName);
+
+    const dailyPlanSystem = armorSystemPrompt(
+      `You are an AI sales assistant. Generate a prioritized daily action plan based on the provided data. Be specific and actionable. Return valid JSON only.`
+    );
+
     const message = await client.messages.create({
       model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929',
       max_tokens: 1500,
+      system: dailyPlanSystem,
       messages: [{
         role: 'user',
-        content: `You are Mike's AI sales assistant at Shipday. Generate a prioritized daily action plan based on this data. Be specific and actionable.
+        content: `Generate a prioritized daily action plan for ${sanitizedRepName} at ${sanitizedCompanyName}.
 
-Today's Data:
-${JSON.stringify(planContext, null, 2)}
+${wrapUserData('todays_data', JSON.stringify(planContext, null, 2))}
 
 Return JSON:
 {

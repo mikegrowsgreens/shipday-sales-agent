@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryShipdayOne } from '@/lib/db';
+import { query, queryOne } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 import Anthropic from '@anthropic-ai/sdk';
+import { getOrgConfigFromSession, DEFAULT_CONFIG } from '@/lib/org-config';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
+import { sanitizeInput, armorSystemPrompt, wrapUserData, sanitizeHtmlOutput, INPUT_LIMITS } from '@/lib/prompt-guard';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
@@ -11,8 +15,12 @@ const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
  */
 export async function GET() {
   try {
-    const org = await queryShipdayOne<{ settings: Record<string, unknown> }>(
-      `SELECT settings FROM shipday.organizations LIMIT 1`,
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
+    const org = await queryOne<{ settings: Record<string, unknown> }>(
+      `SELECT settings FROM crm.organizations WHERE org_id = $1`,
+      [orgId],
     );
     const signature = (org?.settings as Record<string, unknown>)?.email_signature as string || '';
     return NextResponse.json({ signature });
@@ -29,6 +37,13 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { action, current_signature, change_level } = body as {
       action: 'scrape' | 'regenerate';
@@ -37,31 +52,27 @@ export async function POST(request: NextRequest) {
     };
 
     if (action === 'scrape') {
-      // The scraped signature from Mike's Gmail (extracted from real sent email)
-      // This is the signature found in the Banks Alehouse thread
+      // Generate a default signature from org config
+      const config = await getOrgConfigFromSession().catch(() => DEFAULT_CONFIG);
+      const senderName = config.persona?.sender_name || 'Sales Team';
+      const senderTitle = config.persona?.sender_title || 'Business Development';
+      const senderEmail = config.persona?.sender_email || '';
+      const companyName = config.company_name || 'SalesHub';
+      const accentColor = config.branding?.primary_color || '#2563eb';
+
       const scrapedSignature = `<table cellpadding="0" cellspacing="0" style="font-family: Arial, sans-serif; font-size: 13px; color: #333; line-height: 1.5;">
   <tr>
-    <td style="vertical-align: top; padding-right: 12px; border-right: 2px solid #2563eb;">
-      <strong style="font-size: 14px; color: #111;">Mike Paulus</strong><br/>
-      <span style="color: #555;">Account Executive | Shipday</span><br/>
-      <span style="color: #2563eb; font-size: 12px; font-style: italic;">Increase revenue. Cut costs. Retain customers.</span>
+    <td style="vertical-align: top; padding-right: 12px; border-right: 2px solid ${accentColor};">
+      <strong style="font-size: 14px; color: #111;">${senderName}</strong><br/>
+      <span style="color: #555;">${senderTitle} | ${companyName}</span>
     </td>
     <td style="vertical-align: top; padding-left: 12px;">
-      <a href="https://calendly.com/mike-paulus-shipday" style="color: #2563eb; text-decoration: none; font-size: 12px;">Book a conversation here</a><br/>
-      <span style="font-size: 12px; color: #555;">&#128222; (970) 825-0707</span><br/>
-      <a href="mailto:mike.paulus@shipday.com" style="color: #2563eb; text-decoration: none; font-size: 12px;">mike.paulus@shipday.com</a>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2" style="padding-top: 8px;">
-      <a href="https://www.shipday.com/case-studies" style="color: #666; font-size: 11px; text-decoration: none;">
-        See How Zeppe's Pizzeria Went From 4.2 to 4.7 Stars on Google with Shipday
-      </a>
+      ${senderEmail ? `<a href="mailto:${senderEmail}" style="color: ${accentColor}; text-decoration: none; font-size: 12px;">${senderEmail}</a>` : ''}
     </td>
   </tr>
 </table>`;
 
-      return NextResponse.json({ signature: scrapedSignature, source: 'gmail_scraped' });
+      return NextResponse.json({ signature: scrapedSignature, source: 'config_generated' });
     }
 
     if (action === 'regenerate') {
@@ -75,9 +86,10 @@ export async function POST(request: NextRequest) {
       }>(
         `SELECT title, raw_text, key_claims, value_props, content_type
          FROM brain.internal_content
-         WHERE is_active = true
+         WHERE is_active = true AND org_id = $1
          ORDER BY updated_at DESC
-         LIMIT 10`
+         LIMIT 10`,
+        [orgId]
       );
 
       const brainContext = brainContent.map(c => {
@@ -95,37 +107,45 @@ export async function POST(request: NextRequest) {
         5: 'Complete redesign from scratch — use brain content to create an entirely new signature with compelling messaging. Keep only contact details.',
       }[level] || '';
 
-      const response = await client.messages.create({
-        model: MODEL,
-        max_tokens: 2000,
-        system: `You are an email signature designer for a B2B SaaS sales rep. Generate a professional HTML email signature using inline CSS (no external stylesheets). The signature should be compact, clean, and render well in all email clients.
+      const config = await getOrgConfigFromSession().catch(() => DEFAULT_CONFIG);
+      const senderName = config.persona?.sender_name || 'Sales Team';
+      const senderTitle = config.persona?.sender_title || 'Business Development';
+      const senderEmail = config.persona?.sender_email || '';
+      const companyName = config.company_name || 'SalesHub';
+      const accentColor = config.branding?.primary_color || '#2563eb';
+
+      const systemPrompt = armorSystemPrompt(`You are an email signature designer for a B2B SaaS sales rep. Generate a professional HTML email signature using inline CSS (no external stylesheets). The signature should be compact, clean, and render well in all email clients.
 
 Requirements:
 - Use HTML tables with inline styles (email-compatible)
 - Keep it concise — max 4-5 lines of text
 - Include a compelling tagline or social proof
-- Use Shipday's blue (#2563eb) as accent color
-- Must include: name, title, company, phone, email, booking link
+- Use ${accentColor} as accent color
+- Must include: name, title, company, and email
 - Add a persuasive CTA or social proof line at the bottom
 
 Contact details to preserve:
-- Name: Mike Paulus
-- Title: Account Executive
-- Company: Shipday
-- Phone: (970) 825-0707
-- Email: mike.paulus@shipday.com
-- Booking: https://calendly.com/mike-paulus-shipday
+- Name: ${senderName}
+- Title: ${senderTitle}
+- Company: ${companyName}
+- Email: ${senderEmail}
 
-Return ONLY the HTML code, no markdown code blocks, no explanation.`,
+Return ONLY the HTML code, no markdown code blocks, no explanation.`);
+
+      const sanitizedCurrentSig = sanitizeInput(current_signature, INPUT_LIMITS.email_body);
+      const sanitizedBrainCtx = sanitizeInput(brainContext, INPUT_LIMITS.brain_content);
+
+      const response = await client.messages.create({
+        model: MODEL,
+        max_tokens: 2000,
+        system: systemPrompt,
         messages: [{
           role: 'user',
           content: `Change level: ${changeLevelPrompt}
 
-Current signature:
-${current_signature || 'No current signature saved.'}
+${wrapUserData('current_signature', sanitizedCurrentSig || 'No current signature saved.')}
 
-Brain content (product knowledge, value props, social proof):
-${brainContext || 'No brain content available.'}
+${wrapUserData('brain_content', sanitizedBrainCtx || 'No brain content available.')}
 
 Generate the new HTML signature.`,
         }],
@@ -138,7 +158,10 @@ Generate the new HTML signature.`,
         .replace(/\n?```$/i, '')
         .trim();
 
-      return NextResponse.json({ signature: cleanHtml, change_level: level });
+      // Sanitize AI-generated HTML to remove any injected scripts/handlers
+      const safeHtml = sanitizeHtmlOutput(cleanHtml);
+
+      return NextResponse.json({ signature: safeHtml, change_level: level });
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });

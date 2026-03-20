@@ -1,17 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { Contact } from '@/lib/types';
+import { withAuth } from '@/lib/route-auth';
 
 // GET /api/contacts/export - Export contacts as CSV
-export async function GET(request: NextRequest) {
+export const GET = withAuth(async (request: NextRequest, { orgId }) => {
   const { searchParams } = request.nextUrl;
   const stage = searchParams.get('stage');
   const tags = searchParams.get('tags');
   const ids = searchParams.get('ids');
 
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const conditions: string[] = ['org_id = $1'];
+  const params: unknown[] = [orgId];
+  let idx = 2;
 
   if (ids) {
     const idList = ids.split(',').map(Number).filter(n => !isNaN(n));
@@ -34,7 +35,7 @@ export async function GET(request: NextRequest) {
     params.push(tagList);
   }
 
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = `WHERE ${conditions.join(' AND ')}`;
 
   const contacts = await query<Contact>(
     `SELECT * FROM crm.contacts ${where} ORDER BY business_name ASC, last_name ASC`,
@@ -69,4 +70,4 @@ export async function GET(request: NextRequest) {
       'Content-Disposition': `attachment; filename="contacts-export-${new Date().toISOString().slice(0, 10)}.csv"`,
     },
   });
-}
+});

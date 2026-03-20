@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/activity
@@ -8,6 +9,8 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { searchParams } = request.nextUrl;
     const range = searchParams.get('range') || '30d';
     const from = searchParams.get('from');
@@ -43,10 +46,10 @@ export async function GET(request: NextRequest) {
               l.business_name, l.contact_name, l.contact_email
        FROM bdr.email_sends es
        JOIN bdr.leads l ON l.lead_id = es.lead_id
-       WHERE 1=1 ${dateFilter}
+       WHERE es.org_id = $${pi} ${dateFilter}
        ORDER BY es.sent_at DESC
-       LIMIT $${pi}`,
-      [...params, limit]
+       LIMIT $${pi + 1}`,
+      [...params, orgId, limit]
     );
 
     // Recent events — mirror the date-filter params (same positional placeholders)
@@ -59,10 +62,10 @@ export async function GET(request: NextRequest) {
        FROM bdr.email_events ee
        JOIN bdr.leads l ON l.lead_id = ee.lead_id
        LEFT JOIN bdr.email_sends es ON es.lead_id = ee.lead_id
-       WHERE 1=1 ${evDateFilter}
+       WHERE ee.org_id = $${evPi} ${evDateFilter}
        ORDER BY ee.event_at DESC
-       LIMIT $${evPi}`,
-      [...evParams, limit]
+       LIMIT $${evPi + 1}`,
+      [...evParams, orgId, limit]
     );
 
     return NextResponse.json({ sends, events });

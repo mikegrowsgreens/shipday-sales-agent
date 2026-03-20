@@ -1,18 +1,20 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Loader2, MessageCircle, DollarSign, Calendar, Truck, HelpCircle, Phone } from 'lucide-react';
+import { useSearchParams } from 'next/navigation';
+import { Send, Loader2, MessageCircle, DollarSign, Calendar, HelpCircle, Info } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 // ─── Brand Constants ─────────────────────────────────────────────────────────
+// Shipday brand — org-specific branding loaded from config at runtime
 
 const BRAND = {
-  green: '#173308',
-  teal: '#34C896',
-  lime: '#9EE870',
-  cyan: '#8FEAFF',
-  lightGreen: '#f3f8f5',
-  bodyText: '#5F6368',
+  primary: '#00C853',
+  primaryDark: '#00A844',
+  accent: '#7C3AED',
+  accentLight: '#E8F5E9',
+  lightBg: '#F9FAFB',
+  bodyText: '#6B7280',
 };
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -65,29 +67,15 @@ function useWindowSize() {
   return size;
 }
 
-// ─── Shipday Logo ────────────────────────────────────────────────────────────
+// ─── Chat Avatar Icon ────────────────────────────────────────────────────────
 
-function ShipdayLogo({ className = '' }: { className?: string }) {
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src="https://cdn.prod.website-files.com/62428b049409c6b74b6b6636/65f48b763da99591f7eb8414_Shipday%20logo.svg"
-      alt="Shipday"
-      className={className}
-      style={{ height: '22px', width: 'auto' }}
-    />
-  );
-}
-
-// ─── Shipday Avatar Icon ─────────────────────────────────────────────────────
-
-function ShipdayIcon() {
+function ChatAvatarIcon() {
   return (
     <div
       className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-      style={{ background: `linear-gradient(135deg, ${BRAND.teal}, ${BRAND.lime})` }}
+      style={{ background: `linear-gradient(135deg, ${BRAND.primary}, ${BRAND.accent})` }}
     >
-      <Truck className="w-3.5 h-3.5 text-white" />
+      <MessageCircle className="w-3.5 h-3.5 text-white" />
     </div>
   );
 }
@@ -131,7 +119,8 @@ declare global {
   }
 }
 
-const CALENDLY_URL = 'https://calendly.com/mike-paulus-shipday';
+// Calendly URL loaded from org config; falls back to empty (hides widget)
+const CALENDLY_URL = ''; // Populated per-org via config
 
 function CalendlyInline({
   name, email, company, qualNotes,
@@ -189,14 +178,14 @@ function CalendlyInline({
 
   return (
     <div className="w-full my-2">
-      <div className="bg-white rounded-xl overflow-hidden shadow-sm" style={{ border: `1px solid ${BRAND.teal}33` }}>
-        <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ background: BRAND.lightGreen, borderColor: `${BRAND.teal}22` }}>
-          <Calendar className="w-4 h-4" style={{ color: BRAND.green }} />
-          <span className="text-sm font-medium" style={{ color: BRAND.green }}>Pick a time with Mike</span>
+      <div className="bg-white rounded-xl overflow-hidden shadow-sm" style={{ border: `1px solid ${BRAND.primary}33` }}>
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ background: BRAND.lightBg, borderColor: `${BRAND.primary}22` }}>
+          <Calendar className="w-4 h-4" style={{ color: BRAND.primaryDark }} />
+          <span className="text-sm font-medium" style={{ color: BRAND.primaryDark }}>Schedule a Demo</span>
         </div>
         {!loaded && (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-6 h-6 animate-spin" style={{ color: BRAND.teal }} />
+            <Loader2 className="w-6 h-6 animate-spin" style={{ color: BRAND.primary }} />
             <span className="ml-2 text-sm text-gray-500">Loading calendar...</span>
           </div>
         )}
@@ -209,15 +198,232 @@ function CalendlyInline({
   );
 }
 
-// ─── Message Renderer (handles [BOOK_DEMO] marker) ──────────────────────────
+// ─── Built-In Booking Widget (Session 8: replaces Calendly when scheduling_provider = 'built_in') ──
+
+interface BookingSlot {
+  start: string;
+  end: string;
+}
+
+function BuiltInBookingWidget({
+  eventSlug, name, email, company,
+}: {
+  eventSlug?: string; name?: string; email?: string; company?: string;
+}) {
+  const [eventTypes, setEventTypes] = useState<Array<{ event_type_id: number; name: string; slug: string; duration_minutes: number }>>([]);
+  const [selectedEventTypeId, setSelectedEventTypeId] = useState<number | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string>('');
+  const [slots, setSlots] = useState<BookingSlot[]>([]);
+  const [loadingSlots, setLoadingSlots] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState<BookingSlot | null>(null);
+  const [bookingName, setBookingName] = useState(name || '');
+  const [bookingEmail, setBookingEmail] = useState(email || '');
+  const [booking, setBooking] = useState(false);
+  const [booked, setBooked] = useState<{ meeting_url?: string; starts_at?: string } | null>(null);
+  const [error, setError] = useState('');
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  // Load event types on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/scheduling/event-types');
+        if (!res.ok) return;
+        const data = await res.json();
+        const types = data.event_types || [];
+        setEventTypes(types);
+        if (eventSlug) {
+          const match = types.find((et: { slug: string }) => et.slug === eventSlug);
+          if (match) setSelectedEventTypeId(match.event_type_id);
+        } else if (types.length === 1) {
+          setSelectedEventTypeId(types[0].event_type_id);
+        }
+      } catch { /* silent */ }
+    })();
+  }, [eventSlug]);
+
+  useEffect(() => { if (name) setBookingName(name); }, [name]);
+  useEffect(() => { if (email) setBookingEmail(email); }, [email]);
+
+  // Load slots when date + event type changes
+  useEffect(() => {
+    if (!selectedDate || !selectedEventTypeId) return;
+    setLoadingSlots(true);
+    setSlots([]);
+    setSelectedSlot(null);
+    (async () => {
+      try {
+        const res = await fetch(`/api/scheduling/slots?event_type_id=${selectedEventTypeId}&date=${selectedDate}&timezone=${encodeURIComponent(tz)}`);
+        const data = await res.json();
+        setSlots(data.slots || []);
+      } catch { setSlots([]); }
+      finally { setLoadingSlots(false); }
+    })();
+  }, [selectedDate, selectedEventTypeId, tz]);
+
+  // Default date to tomorrow
+  useEffect(() => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    setSelectedDate(tomorrow.toISOString().split('T')[0]);
+  }, []);
+
+  const handleBook = async () => {
+    if (!selectedSlot || !bookingName || !bookingEmail || !selectedEventTypeId) return;
+    setBooking(true);
+    setError('');
+    try {
+      const res = await fetch('/api/scheduling/book', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type_id: selectedEventTypeId,
+          starts_at: selectedSlot.start,
+          timezone: tz,
+          name: bookingName,
+          email: bookingEmail,
+          answers: company ? { company } : undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setBooked({ meeting_url: data.meeting_url, starts_at: selectedSlot.start });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Booking failed. Please try again.');
+    } finally {
+      setBooking(false);
+    }
+  };
+
+  if (booked) {
+    return (
+      <div className="bg-white rounded-xl overflow-hidden shadow-sm" style={{ border: `1px solid ${BRAND.primary}33` }}>
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ background: BRAND.lightBg, borderColor: `${BRAND.primary}22` }}>
+          <Calendar className="w-4 h-4" style={{ color: BRAND.primaryDark }} />
+          <span className="text-sm font-medium" style={{ color: BRAND.primaryDark }}>Meeting Booked!</span>
+        </div>
+        <div className="p-4 space-y-2">
+          <p className="text-sm text-gray-700">
+            Your meeting is confirmed for{' '}
+            <strong>{new Date(booked.starts_at!).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</strong>
+          </p>
+          {booked.meeting_url && (
+            <a href={booked.meeting_url} target="_blank" rel="noopener noreferrer" className="text-sm font-medium underline" style={{ color: BRAND.primary }}>
+              Join Meeting Link
+            </a>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl overflow-hidden shadow-sm" style={{ border: `1px solid ${BRAND.primary}33` }}>
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ background: BRAND.lightBg, borderColor: `${BRAND.primary}22` }}>
+        <Calendar className="w-4 h-4" style={{ color: BRAND.primaryDark }} />
+        <span className="text-sm font-medium" style={{ color: BRAND.primaryDark }}>Schedule a Meeting</span>
+      </div>
+      <div className="p-4 space-y-3">
+        {eventTypes.length > 1 && !eventSlug && (
+          <select
+            value={selectedEventTypeId || ''}
+            onChange={(e) => setSelectedEventTypeId(Number(e.target.value))}
+            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 text-gray-800"
+          >
+            <option value="">Select meeting type...</option>
+            {eventTypes.map(et => (
+              <option key={et.event_type_id} value={et.event_type_id}>
+                {et.name} ({et.duration_minutes} min)
+              </option>
+            ))}
+          </select>
+        )}
+
+        <input
+          type="date"
+          value={selectedDate}
+          onChange={(e) => setSelectedDate(e.target.value)}
+          min={new Date().toISOString().split('T')[0]}
+          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 text-gray-800"
+        />
+
+        {loadingSlots && (
+          <div className="flex items-center justify-center py-4">
+            <Loader2 className="w-5 h-5 animate-spin" style={{ color: BRAND.primary }} />
+            <span className="ml-2 text-sm text-gray-500">Loading times...</span>
+          </div>
+        )}
+        {!loadingSlots && slots.length > 0 && (
+          <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto">
+            {slots.map((slot) => {
+              const time = new Date(slot.start).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+              const isSelected = selectedSlot?.start === slot.start;
+              return (
+                <button
+                  key={slot.start}
+                  onClick={() => setSelectedSlot(slot)}
+                  className={`px-2 py-1.5 text-sm rounded-lg border transition-colors ${
+                    isSelected ? 'text-white font-medium' : 'text-gray-700 border-gray-200 hover:border-blue-300'
+                  }`}
+                  style={isSelected ? { background: BRAND.primary, borderColor: BRAND.primary } : undefined}
+                >
+                  {time}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {!loadingSlots && selectedDate && selectedEventTypeId && slots.length === 0 && (
+          <p className="text-sm text-gray-500 text-center py-2">No available times on this date. Try another day.</p>
+        )}
+
+        {selectedSlot && (
+          <div className="space-y-2 pt-2 border-t border-gray-100">
+            <input
+              type="text"
+              placeholder="Your name"
+              value={bookingName}
+              onChange={(e) => setBookingName(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 text-gray-800"
+            />
+            <input
+              type="email"
+              placeholder="Your email"
+              value={bookingEmail}
+              onChange={(e) => setBookingEmail(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 text-gray-800"
+            />
+            {error && <p className="text-xs text-red-600">{error}</p>}
+            <button
+              onClick={handleBook}
+              disabled={booking || !bookingName || !bookingEmail}
+              className="w-full py-2 rounded-lg text-sm font-medium text-white transition-opacity disabled:opacity-50"
+              style={{ background: BRAND.primary }}
+            >
+              {booking ? 'Booking...' : 'Confirm Booking'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Message Renderer (handles [BOOK_DEMO] and [BOOK_MEETING:slug] markers) ─
 
 function AssistantMessage({
-  content, leadInfo, qualification, timestamp,
+  content, leadInfo, qualification, timestamp, schedulingProvider,
 }: {
-  content: string; leadInfo: LeadInfo; qualification: QualificationState; timestamp: number;
+  content: string; leadInfo: LeadInfo; qualification: QualificationState; timestamp: number; schedulingProvider: 'built_in' | 'calendly';
 }) {
+  // Detect [BOOK_MEETING:slug] marker (Session 8)
+  const bookMeetingMatch = content.match(/\[BOOK_MEETING:([^\]]+)\]/);
+  // Detect [BOOK_DEMO] marker (legacy Calendly)
   const MARKER = '[BOOK_DEMO]';
-  const markerIndex = content.indexOf(MARKER);
+  const hasBookDemo = content.includes(MARKER);
+
+  const hasBookingMarker = bookMeetingMatch || hasBookDemo;
+  const eventSlug = bookMeetingMatch ? bookMeetingMatch[1] : undefined;
 
   // Build qualification notes for Calendly pre-fill
   const qualNotes = [
@@ -229,14 +435,14 @@ function AssistantMessage({
 
   const prefillNotes = qualNotes ? `Delivery ops eval: ${qualNotes}` : undefined;
 
-  if (markerIndex === -1) {
+  if (!hasBookingMarker) {
     return (
       <div className="flex gap-3 justify-start group">
-        <ShipdayIcon />
+        <ChatAvatarIcon />
         <div className="flex flex-col gap-1 max-w-[80%]">
           <div
             className="rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed"
-            style={{ background: BRAND.lightGreen, color: '#1a1a1a' }}
+            style={{ background: BRAND.lightBg, color: '#1a1a1a' }}
           >
             <div className="whitespace-pre-wrap">{content}</div>
           </div>
@@ -248,36 +454,51 @@ function AssistantMessage({
     );
   }
 
+  // Split content around the marker
+  const markerFull = bookMeetingMatch ? bookMeetingMatch[0] : MARKER;
+  const markerIndex = content.indexOf(markerFull);
   const before = content.slice(0, markerIndex).trim();
-  const after = content.slice(markerIndex + MARKER.length).trim();
+  const after = content.slice(markerIndex + markerFull.length).trim();
+
+  // Decide which widget to render: built-in or Calendly
+  const useBuiltIn = schedulingProvider === 'built_in' || !!bookMeetingMatch;
 
   return (
     <div className="space-y-3">
       {before && (
         <div className="flex gap-3 justify-start">
-          <ShipdayIcon />
+          <ChatAvatarIcon />
           <div
             className="max-w-[80%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed"
-            style={{ background: BRAND.lightGreen, color: '#1a1a1a' }}
+            style={{ background: BRAND.lightBg, color: '#1a1a1a' }}
           >
             <div className="whitespace-pre-wrap">{before}</div>
           </div>
         </div>
       )}
       <div className="pl-10">
-        <CalendlyInline
-          name={leadInfo.name}
-          email={leadInfo.email}
-          company={leadInfo.company}
-          qualNotes={prefillNotes}
-        />
+        {useBuiltIn ? (
+          <BuiltInBookingWidget
+            eventSlug={eventSlug}
+            name={leadInfo.name}
+            email={leadInfo.email}
+            company={leadInfo.company}
+          />
+        ) : (
+          <CalendlyInline
+            name={leadInfo.name}
+            email={leadInfo.email}
+            company={leadInfo.company}
+            qualNotes={prefillNotes}
+          />
+        )}
       </div>
       {after && (
         <div className="flex gap-3 justify-start">
-          <ShipdayIcon />
+          <ChatAvatarIcon />
           <div
             className="max-w-[80%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed"
-            style={{ background: BRAND.lightGreen, color: '#1a1a1a' }}
+            style={{ background: BRAND.lightBg, color: '#1a1a1a' }}
           >
             <div className="whitespace-pre-wrap">{after}</div>
           </div>
@@ -295,20 +516,20 @@ function AssistantMessage({
 function TypingIndicator() {
   return (
     <div className="flex gap-3">
-      <ShipdayIcon />
-      <div className="rounded-2xl rounded-bl-md px-4 py-3" style={{ background: BRAND.lightGreen }}>
+      <ChatAvatarIcon />
+      <div className="rounded-2xl rounded-bl-md px-4 py-3" style={{ background: BRAND.lightBg }}>
         <div className="flex gap-1 items-center">
           <div
             className="w-2 h-2 rounded-full animate-bounce"
-            style={{ background: BRAND.teal, animationDelay: '0ms', animationDuration: '0.6s' }}
+            style={{ background: BRAND.primary, animationDelay: '0ms', animationDuration: '0.6s' }}
           />
           <div
             className="w-2 h-2 rounded-full animate-bounce"
-            style={{ background: BRAND.teal, animationDelay: '150ms', animationDuration: '0.6s' }}
+            style={{ background: BRAND.primary, animationDelay: '150ms', animationDuration: '0.6s' }}
           />
           <div
             className="w-2 h-2 rounded-full animate-bounce"
-            style={{ background: BRAND.teal, animationDelay: '300ms', animationDuration: '0.6s' }}
+            style={{ background: BRAND.primary, animationDelay: '300ms', animationDuration: '0.6s' }}
           />
         </div>
       </div>
@@ -320,46 +541,46 @@ function TypingIndicator() {
 
 const STARTER_PROMPTS = [
   {
-    text: "We miss phone orders during the lunch rush",
-    icon: Phone,
-    borderColor: `${BRAND.lime}50`,
-    hoverBorder: `${BRAND.lime}90`,
-    hoverBg: `${BRAND.lime}10`,
-  },
-  {
-    text: "How can I get more repeat customers?",
-    icon: MessageCircle,
-    borderColor: '#e879f940',
-    hoverBorder: '#e879f980',
-    hoverBg: '#e879f910',
-  },
-  {
-    text: "Tell me about the AI Receptionist",
-    icon: HelpCircle,
-    borderColor: `${BRAND.teal}40`,
-    hoverBorder: `${BRAND.teal}80`,
-    hoverBg: `${BRAND.teal}10`,
-  },
-  {
-    text: "DoorDash commissions are eating our margins",
-    icon: DollarSign,
-    borderColor: '#f97316',
-    hoverBorder: '#fb923c',
-    hoverBg: '#f9731610',
-  },
-  {
     text: "What is Shipday?",
-    icon: Truck,
-    borderColor: `${BRAND.cyan}60`,
-    hoverBorder: `${BRAND.cyan}A0`,
-    hoverBg: `${BRAND.cyan}10`,
+    icon: Info,
+    borderColor: `${BRAND.primary}40`,
+    hoverBorder: `${BRAND.primary}80`,
+    hoverBg: `${BRAND.primary}10`,
   },
   {
-    text: "Our Google reviews need help",
+    text: "Can I use Shipday without hiring drivers?",
+    icon: HelpCircle,
+    borderColor: `${BRAND.primary}40`,
+    hoverBorder: `${BRAND.primary}80`,
+    hoverBg: `${BRAND.primary}10`,
+  },
+  {
+    text: "What happens when my restaurant misses a phone call?",
+    icon: MessageCircle,
+    borderColor: `${BRAND.primary}40`,
+    hoverBorder: `${BRAND.primary}80`,
+    hoverBg: `${BRAND.primary}10`,
+  },
+  {
+    text: "How much am I losing to DoorDash and Uber Eats fees each month?",
+    icon: DollarSign,
+    borderColor: `${BRAND.primary}40`,
+    hoverBorder: `${BRAND.primary}80`,
+    hoverBg: `${BRAND.primary}10`,
+  },
+  {
+    text: "How do restaurants keep their DoorDash listings while building direct orders?",
     icon: Calendar,
-    borderColor: '#60a5fa40',
-    hoverBorder: '#60a5fa80',
-    hoverBg: '#60a5fa10',
+    borderColor: `${BRAND.primary}40`,
+    hoverBorder: `${BRAND.primary}80`,
+    hoverBg: `${BRAND.primary}10`,
+  },
+  {
+    text: "How long until Shipday pays for itself?",
+    icon: DollarSign,
+    borderColor: `${BRAND.primary}40`,
+    hoverBorder: `${BRAND.primary}80`,
+    hoverBg: `${BRAND.primary}10`,
   },
 ];
 
@@ -372,11 +593,69 @@ export default function ProspectChatPage() {
   const [leadInfo, setLeadInfo] = useState<LeadInfo>({});
   const [qualification, setQualification] = useState<QualificationState>({});
   const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>([]);
+  const [schedulingProvider, setSchedulingProvider] = useState<'built_in' | 'calendly'>('calendly');
+  const [campaignContext, setCampaignContext] = useState<Record<string, string> | null>(null);
+  const [campaignInitDone, setCampaignInitDone] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
   const isMobile = width > 0 && width < 640;
+  const searchParams = useSearchParams();
+
+  // ─── Campaign Context from URL params (email → chat handoff) ────────────────
+  useEffect(() => {
+    if (campaignInitDone) return;
+    const src = searchParams.get('src');
+    if (src !== 'campaign') return;
+
+    const ctx: Record<string, string> = {};
+    for (const key of ['token', 'cid', 'step', 'angle', 'tier', 'lead']) {
+      const val = searchParams.get(key);
+      if (val) ctx[key] = val;
+    }
+    if (Object.keys(ctx).length === 0) return;
+
+    setCampaignContext(ctx);
+    setCampaignInitDone(true);
+
+    // Auto-send campaign init to get personalized greeting
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await fetch('/api/chat/prospect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: '__campaign_init__',
+            history: [],
+            lead_info: {},
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            campaign_context: {
+              campaign_template_id: ctx.cid ? parseInt(ctx.cid) : undefined,
+              campaign_step: ctx.step ? parseInt(ctx.step) : undefined,
+              lead_id: ctx.lead ? parseInt(ctx.lead) : undefined,
+              tier: ctx.tier || null,
+              angle: ctx.angle || null,
+              tracking_token: ctx.token || null,
+              source: 'campaign',
+            },
+          }),
+        });
+        const data = await res.json();
+        if (data.reply) {
+          setMessages([{ role: 'assistant', content: data.reply, timestamp: Date.now() }]);
+        }
+        if (data.detected_info) {
+          setLeadInfo(prev => ({ ...prev, ...data.detected_info }));
+        }
+      } catch (err) {
+        console.error('[chat] campaign init error:', err);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [searchParams, campaignInitDone]);
 
   // Load Google Fonts
   useEffect(() => {
@@ -449,7 +728,7 @@ export default function ProspectChatPage() {
     try {
       const historyToSend = messages.slice(-19).map(m => ({
         role: m.role,
-        content: m.content.replace(/\[BOOK_DEMO\]/g, '').trim(),
+        content: m.content.replace(/\[BOOK_DEMO\]/g, '').replace(/\[BOOK_MEETING:[^\]]+\]/g, '').trim(),
       }));
       const res = await fetch('/api/chat/prospect', {
         method: 'POST',
@@ -458,6 +737,18 @@ export default function ProspectChatPage() {
           message: text,
           history: historyToSend,
           lead_info: leadInfo,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          ...(campaignContext && {
+            campaign_context: {
+              campaign_template_id: campaignContext.cid ? parseInt(campaignContext.cid) : undefined,
+              campaign_step: campaignContext.step ? parseInt(campaignContext.step) : undefined,
+              lead_id: campaignContext.lead ? parseInt(campaignContext.lead) : undefined,
+              tier: campaignContext.tier || null,
+              angle: campaignContext.angle || null,
+              tracking_token: campaignContext.token || null,
+              source: 'campaign',
+            },
+          }),
         }),
       });
 
@@ -477,6 +768,11 @@ export default function ProspectChatPage() {
       if (data.suggested_prompts && Array.isArray(data.suggested_prompts)) {
         setSuggestedPrompts(data.suggested_prompts);
       }
+
+      // Session 8: Pick up scheduling_provider from API response
+      if (data.scheduling_provider) {
+        setSchedulingProvider(data.scheduling_provider);
+      }
     } catch (err) {
       setMessages(prev => [
         ...prev,
@@ -494,7 +790,7 @@ export default function ProspectChatPage() {
         setTimeout(() => inputRef.current?.focus(), 100);
       }
     }
-  }, [messages, loading, leadInfo, isMobile]);
+  }, [messages, loading, leadInfo, isMobile, campaignContext]);
 
   const handleSend = () => {
     sendMessage(input);
@@ -524,52 +820,30 @@ export default function ProspectChatPage() {
       {/* Header */}
       <header className="border-b border-gray-200 px-4 py-3 flex items-center justify-between shrink-0 bg-white z-10">
         <div className="flex items-center gap-3">
-          <ShipdayLogo />
+          <span className="text-base font-semibold" style={{ color: BRAND.primaryDark }}>Sales Chat</span>
         </div>
-        <a
-          href="https://calendly.com/mike-paulus-shipday"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="hidden sm:flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition-all duration-200"
-          style={{
-            color: BRAND.green,
-            background: BRAND.lightGreen,
-            border: `1px solid ${BRAND.teal}30`,
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = `${BRAND.teal}20`;
-            e.currentTarget.style.borderColor = `${BRAND.teal}60`;
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = BRAND.lightGreen;
-            e.currentTarget.style.borderColor = `${BRAND.teal}30`;
-          }}
-        >
-          <Calendar className="w-3 h-3" />
-          Book a Demo
-        </a>
       </header>
 
       {/* Chat Area */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto overscroll-contain">
+      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
         {!hasMessages ? (
           /* Welcome Screen */
           <div className="flex flex-col items-center justify-center h-full px-4 py-8">
             <div
               className="w-16 h-16 rounded-2xl flex items-center justify-center mb-6"
-              style={{ background: `linear-gradient(135deg, ${BRAND.teal}, ${BRAND.lime})` }}
+              style={{ background: `linear-gradient(135deg, ${BRAND.primary}, ${BRAND.accentLight})` }}
             >
               <MessageCircle className="w-8 h-8 text-white" />
             </div>
             <h2
               className="text-xl font-semibold mb-2 text-center"
-              style={{ color: BRAND.green, fontFamily: "'Varela Round', sans-serif" }}
+              style={{ color: BRAND.primaryDark, fontFamily: "'Varela Round', sans-serif" }}
             >
-              Tired of losing money on delivery commissions?
+              Hey there
             </h2>
             <p className="text-sm mb-8 text-center max-w-md" style={{ color: BRAND.bodyText }}>
-              I help restaurants calculate exactly how much they&apos;re losing to DoorDash
-              and UberEats — and show how to keep that money. Let&apos;s look at your numbers.
+              I&apos;m here to help you explore how our platform can drive growth for your business.
+              Ask me anything or pick a topic below.
             </p>
 
             {/* Starter Prompts */}
@@ -580,7 +854,7 @@ export default function ProspectChatPage() {
                   <button
                     key={prompt.text}
                     onClick={() => handleStarterClick(prompt.text)}
-                    className="flex items-start gap-3 p-3 rounded-xl text-left transition-all duration-200 group"
+                    className="flex items-start gap-3 p-3 sm:p-4 rounded-xl text-left transition-all duration-200 group min-h-[44px]"
                     style={{ border: `1px solid ${prompt.borderColor}` }}
                     onMouseEnter={(e) => {
                       e.currentTarget.style.borderColor = prompt.hoverBorder;
@@ -608,7 +882,7 @@ export default function ProspectChatPage() {
                 <div key={i} className="flex flex-col items-end gap-1 group">
                   <div
                     className="max-w-[80%] rounded-2xl rounded-br-md px-4 py-2.5 text-sm leading-relaxed text-white"
-                    style={{ background: BRAND.green }}
+                    style={{ background: BRAND.primaryDark }}
                   >
                     <div className="whitespace-pre-wrap">{msg.content}</div>
                   </div>
@@ -623,6 +897,7 @@ export default function ProspectChatPage() {
                   leadInfo={leadInfo}
                   qualification={qualification}
                   timestamp={msg.timestamp}
+                  schedulingProvider={schedulingProvider}
                 />
               )
             ))}
@@ -644,17 +919,17 @@ export default function ProspectChatPage() {
                   onClick={() => sendMessage(prompt)}
                   className="text-xs px-3 py-1.5 rounded-full transition-all duration-200 cursor-pointer"
                   style={{
-                    color: BRAND.green,
+                    color: BRAND.primaryDark,
                     background: 'white',
-                    border: `1px solid ${BRAND.teal}40`,
+                    border: `1px solid ${BRAND.primary}40`,
                   }}
                   onMouseEnter={(e) => {
-                    e.currentTarget.style.background = `${BRAND.teal}12`;
-                    e.currentTarget.style.borderColor = `${BRAND.teal}80`;
+                    e.currentTarget.style.background = `${BRAND.primary}12`;
+                    e.currentTarget.style.borderColor = `${BRAND.primary}80`;
                   }}
                   onMouseLeave={(e) => {
                     e.currentTarget.style.background = 'white';
-                    e.currentTarget.style.borderColor = `${BRAND.teal}40`;
+                    e.currentTarget.style.borderColor = `${BRAND.primary}40`;
                   }}
                 >
                   {prompt}
@@ -668,7 +943,7 @@ export default function ProspectChatPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={isMobile ? "Ask about delivery savings..." : "Ask about delivery management, pricing, savings..."}
+              placeholder={isMobile ? "Ask a question..." : "Ask about our platform, pricing, or how we can help..."}
               rows={1}
               className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:border-transparent resize-none"
               style={{
@@ -677,7 +952,7 @@ export default function ProspectChatPage() {
                 fontSize: '16px', // Prevents iOS zoom on focus
               }}
               onFocus={(e) => {
-                e.currentTarget.style.boxShadow = `0 0 0 2px ${BRAND.teal}50`;
+                e.currentTarget.style.boxShadow = `0 0 0 2px ${BRAND.primary}50`;
               }}
               onBlur={(e) => {
                 e.currentTarget.style.boxShadow = 'none';
@@ -692,14 +967,14 @@ export default function ProspectChatPage() {
               onClick={handleSend}
               disabled={!input.trim() || loading}
               className="disabled:opacity-40 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-colors shrink-0"
-              style={{ background: BRAND.green }}
+              style={{ background: BRAND.primaryDark }}
               onMouseEnter={(e) => {
                 if (!e.currentTarget.disabled) {
                   e.currentTarget.style.background = '#1e4a0c';
                 }
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.background = BRAND.green;
+                e.currentTarget.style.background = BRAND.primaryDark;
               }}
             >
               {loading ? (
@@ -713,15 +988,6 @@ export default function ProspectChatPage() {
             <p className="text-[10px] text-gray-400">
               Powered by Shipday
             </p>
-            <a
-              href="https://calendly.com/mike-paulus-shipday"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[10px] sm:hidden"
-              style={{ color: BRAND.teal }}
-            >
-              Book a demo with Mike
-            </a>
           </div>
         </div>
       </div>

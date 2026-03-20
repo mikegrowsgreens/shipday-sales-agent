@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
+import { getOrgPlan, requireFeature } from '@/lib/feature-gate';
 
 /**
  * GET /api/phone/calls - List phone calls with filters
@@ -7,6 +9,11 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+
+    const plan = await getOrgPlan(tenant.org_id);
+    requireFeature(plan, 'phoneDialer');
+
     const { searchParams } = new URL(request.url);
     const search = searchParams.get('search') || '';
     const days = parseInt(searchParams.get('days') || '30');
@@ -17,8 +24,14 @@ export async function GET(request: NextRequest) {
     const sort = searchParams.get('sort') || 'created_at';
     const order = searchParams.get('order') === 'asc' ? 'ASC' : 'DESC';
 
-    const allowedSorts = ['created_at', 'duration_seconds', 'disposition', 'status'];
-    const sortCol = allowedSorts.includes(sort) ? `pc.${sort}` : 'pc.created_at';
+    const sortMap: Record<string, string> = {
+      created_at: 'pc.created_at',
+      duration_secs: 'pc.duration_secs',
+      duration_seconds: 'pc.duration_secs',
+      disposition: 'pc.disposition',
+      status: 'pc.status',
+    };
+    const sortCol = sortMap[sort] || 'pc.created_at';
 
     const params: unknown[] = [days];
     let pi = 2;
@@ -61,7 +74,7 @@ export async function GET(request: NextRequest) {
       SELECT
         pc.call_id, pc.contact_id, pc.direction, pc.from_number, pc.to_number,
         pc.twilio_call_sid AS twilio_sid, pc.status, pc.disposition,
-        pc.duration_seconds, pc.recording_url, pc.notes,
+        pc.duration_secs AS duration_seconds, pc.recording_url, pc.notes,
         pc.started_at, pc.ended_at, pc.created_at, pc.metadata,
         c.first_name, c.last_name, c.business_name, c.email, c.phone,
         c.lifecycle_stage, c.lead_score, c.engagement_score
@@ -77,6 +90,9 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ calls, total, limit, offset });
   } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as unknown as { code: string }).code === 'PLAN_UPGRADE_REQUIRED') {
+      return NextResponse.json({ error: error.message, code: 'PLAN_UPGRADE_REQUIRED' }, { status: 403 });
+    }
     console.error('[phone/calls] error:', error);
     return NextResponse.json({ error: 'Failed to load phone calls' }, { status: 500 });
   }

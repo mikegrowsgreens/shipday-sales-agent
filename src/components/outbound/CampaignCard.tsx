@@ -3,10 +3,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   Check, X, RefreshCw, Star, Loader2,
-  Mail, Eye, MousePointerClick, MessageSquare, Zap, FlaskConical,
-  Send, Clock, TrendingUp,
+  Mail, Eye, MousePointerClick, MessageSquare, Zap,
+  Send, Clock, TrendingUp, Pencil, Link2,
 } from 'lucide-react';
 import EmailPreview from '@/components/ui/EmailPreview';
+import TestSendButton from '@/components/ui/TestSendButton';
 import type { BdrLead, CampaignEmail } from '@/lib/types';
 
 interface EmailSend {
@@ -27,7 +28,7 @@ interface CampaignCardProps {
   lead: BdrLead;
   selected: boolean;
   onSelect: (id: string) => void;
-  onAction: (ids: string[], action: 'approve' | 'reject') => Promise<void>;
+  onAction: (ids: string[], action: 'approve' | 'reject', threadSendId?: string) => Promise<void>;
   onRegenerate: (leadId: string, angle: string, tone?: string, instructions?: string) => Promise<void>;
   onEdit: (leadId: string, subject: string, body: string) => Promise<void>;
   sends?: EmailSend[];
@@ -84,8 +85,10 @@ export default function CampaignCard({
   const [regenInstructions, setRegenInstructions] = useState('');
   const [regenerating, setRegenerating] = useState(false);
   const [actioning, setActioning] = useState(false);
-  const [testSending, setTestSending] = useState(false);
-  const [testSent, setTestSent] = useState(false);
+  const [editingSubject, setEditingSubject] = useState(false);
+  const [editSubjectValue, setEditSubjectValue] = useState(lead.email_subject || '');
+  const [threadEnabled, setThreadEnabled] = useState(false);
+  const [threadSendId, setThreadSendId] = useState<string>('');
 
   // Aggregated engagement metrics
   const metrics = useMemo(() => {
@@ -119,7 +122,14 @@ export default function CampaignCard({
 
   const handleApprove = async () => {
     setActioning(true);
-    try { await onAction([lead.lead_id], 'approve'); } finally { setActioning(false); }
+    try {
+      await onAction([lead.lead_id], 'approve', threadEnabled && threadSendId ? threadSendId : undefined);
+    } finally { setActioning(false); }
+  };
+
+  const handleSaveSubject = async () => {
+    await onEdit(lead.lead_id, editSubjectValue, lead.email_body || '');
+    setEditingSubject(false);
   };
 
   const handleReject = async () => {
@@ -127,20 +137,13 @@ export default function CampaignCard({
     try { await onAction([lead.lead_id], 'reject'); } finally { setActioning(false); }
   };
 
-  const handleTestSend = async () => {
-    setTestSending(true);
-    try {
-      const res = await fetch('/api/bdr/campaigns/test-send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lead_id: lead.lead_id }),
-      });
-      if (res.ok) {
-        setTestSent(true);
-        setTimeout(() => setTestSent(false), 3000);
-      }
-    } catch { /* ignore */ }
-    finally { setTestSending(false); }
+  const handleTestSend = async (email: string) => {
+    const res = await fetch('/api/bdr/campaigns/test-send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lead_id: lead.lead_id, recipient_email: email }),
+    });
+    if (!res.ok) throw new Error('Test send failed');
   };
 
   const handleRegenerate = async () => {
@@ -269,16 +272,19 @@ export default function CampaignCard({
 
         {/* Action buttons */}
         <div className="flex items-center gap-1 shrink-0">
-          <button
-            onClick={handleTestSend}
-            disabled={testSending || !lead.email_subject}
-            className={`p-1.5 rounded-lg transition-colors ${
-              testSent ? 'bg-green-600/30 text-green-400' : 'bg-yellow-600/20 hover:bg-yellow-600/40 text-yellow-400 disabled:opacity-30'
-            }`}
-            title={testSent ? 'Test sent!' : 'Send test email'}
-          >
-            {testSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <FlaskConical className="w-4 h-4" />}
-          </button>
+          <TestSendButton onSend={handleTestSend} disabled={!lead.email_subject} />
+          {sends.length > 0 && (
+            <button
+              onClick={() => { setThreadEnabled(!threadEnabled); if (!threadSendId && sends.length > 0) setThreadSendId(sends[0].id); }}
+              className={`px-2 py-1.5 rounded-lg transition-colors flex items-center gap-1 ${
+                threadEnabled ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-800 hover:bg-gray-700 text-gray-400'
+              }`}
+              title="Thread as reply to previous send"
+            >
+              <Link2 className="w-4 h-4" />
+              <span className="text-xs">Thread</span>
+            </button>
+          )}
           <button onClick={handleApprove} disabled={actioning}
             className="p-1.5 bg-green-600/20 hover:bg-green-600/40 text-green-400 rounded-lg transition-colors" title="Approve & send">
             {actioning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
@@ -298,6 +304,54 @@ export default function CampaignCard({
           </button>
         </div>
       </div>
+
+      {/* Subject line row */}
+      {lead.email_subject && (
+        <div className="px-4 py-2 border-t border-gray-800/50 flex items-center gap-2 group/subject">
+          <Mail className="w-3.5 h-3.5 text-gray-600 shrink-0" />
+          {editingSubject ? (
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <input
+                type="text"
+                value={editSubjectValue}
+                onChange={(e) => setEditSubjectValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleSaveSubject(); if (e.key === 'Escape') { setEditSubjectValue(lead.email_subject || ''); setEditingSubject(false); } }}
+                className="flex-1 bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+                autoFocus
+              />
+              <button onClick={handleSaveSubject} className="text-green-400 hover:text-green-300 p-0.5"><Check className="w-3.5 h-3.5" /></button>
+              <button onClick={() => { setEditSubjectValue(lead.email_subject || ''); setEditingSubject(false); }} className="text-gray-500 hover:text-gray-300 p-0.5"><X className="w-3.5 h-3.5" /></button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setEditingSubject(true)}
+              className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+            >
+              <span className="text-sm text-gray-200 font-medium truncate">{lead.email_subject}</span>
+              <Pencil className="w-3 h-3 text-gray-600 opacity-0 group-hover/subject:opacity-100 transition-opacity shrink-0" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Threading selector */}
+      {threadEnabled && sends.length > 0 && (
+        <div className="px-4 py-2 border-t border-gray-800/50 bg-indigo-900/10 flex items-center gap-2">
+          <Link2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+          <span className="text-[10px] text-indigo-400 shrink-0">Reply to:</span>
+          <select
+            value={threadSendId}
+            onChange={(e) => setThreadSendId(e.target.value)}
+            className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300"
+          >
+            {sends.map((send, idx) => (
+              <option key={send.id} value={send.id}>
+                #{idx + 1} — {send.subject} ({new Date(send.sent_at).toLocaleDateString('en', { month: 'short', day: 'numeric' })})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* Reply sentiment bar */}
       {metrics.totalSent > 0 && metrics.lastReply && (
@@ -520,6 +574,7 @@ export default function CampaignCard({
             body={lead.email_body || ''}
             status="draft"
             editable={true}
+            defaultExpanded={true}
             onSave={handleSaveEdit}
           />
         </div>

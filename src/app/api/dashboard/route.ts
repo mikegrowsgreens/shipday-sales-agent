@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryShipday } from '@/lib/db';
+import { query, queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/dashboard?range=7d|14d|30d|90d|all|custom&from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -12,6 +13,8 @@ import { query, queryShipday } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const range = request.nextUrl.searchParams.get('range') || '30d';
     const from = request.nextUrl.searchParams.get('from');
     const to = request.nextUrl.searchParams.get('to');
@@ -26,22 +29,22 @@ export async function GET(request: NextRequest) {
     };
 
     // Parameterized date filter builder
-    // Returns { filter, params } where filter contains $1, $2 etc.
+    // startParam is the next available $N index (orgId is always $1)
     type DateFilter = { filter: string; params: unknown[] };
 
-    function buildDateFilter(col: string): DateFilter {
+    function buildDateFilter(col: string, startParam = 2): DateFilter {
       if (range === 'custom' && from) {
         if (to) {
           return {
-            filter: `AND ${col} >= $1::date AND ${col} <= $2::date + INTERVAL '1 day'`,
+            filter: `AND ${col} >= $${startParam}::date AND ${col} <= $${startParam + 1}::date + INTERVAL '1 day'`,
             params: [from, to],
           };
         }
-        return { filter: `AND ${col} >= $1::date`, params: [from] };
+        return { filter: `AND ${col} >= $${startParam}::date`, params: [from] };
       }
       if (range !== 'all' && daysMap[range]) {
         return {
-          filter: `AND ${col} > NOW() - INTERVAL '1 day' * $1`,
+          filter: `AND ${col} > NOW() - INTERVAL '1 day' * $${startParam}`,
           params: [daysMap[range]],
         };
       }
@@ -50,7 +53,8 @@ export async function GET(request: NextRequest) {
 
     // CRM stats (contacts, sequences, tasks — always all-time)
     const stageRows = await query<{ lifecycle_stage: string; count: string }>(
-      `SELECT lifecycle_stage, COUNT(*)::text as count FROM crm.contacts GROUP BY lifecycle_stage`
+      `SELECT lifecycle_stage, COUNT(*)::text as count FROM crm.contacts WHERE org_id = $1 GROUP BY lifecycle_stage`,
+      [orgId]
     );
     const contacts_by_stage: Record<string, number> = {};
     let total_contacts = 0;
@@ -61,12 +65,14 @@ export async function GET(request: NextRequest) {
     }
 
     const seqRow = await query<{ count: string }>(
-      `SELECT COUNT(*)::text as count FROM crm.sequence_enrollments WHERE status = 'active'`
+      `SELECT COUNT(*)::text as count FROM crm.sequence_enrollments WHERE org_id = $1 AND status = 'active'`,
+      [orgId]
     );
     const active_sequences = parseInt(seqRow[0]?.count || '0');
 
     const taskRow = await query<{ count: string }>(
-      `SELECT COUNT(*)::text as count FROM crm.task_queue WHERE status IN ('pending','in_progress')`
+      `SELECT COUNT(*)::text as count FROM crm.task_queue WHERE org_id = $1 AND status IN ('pending','in_progress')`,
+      [orgId]
     );
     const pending_tasks = parseInt(taskRow[0]?.count || '0');
 
@@ -82,18 +88,18 @@ export async function GET(request: NextRequest) {
     const [crmSentRow, crmOpenRow, crmReplyRow] = await Promise.all([
       query<{ count: string }>(
         `SELECT COUNT(*)::text as count FROM crm.touchpoints
-         WHERE channel = 'email' AND event_type = 'sent' ${crmDF.filter}`,
-        crmDF.params
+         WHERE org_id = $1 AND channel = 'email' AND event_type = 'sent' ${crmDF.filter}`,
+        [orgId, ...crmDF.params]
       ),
       query<{ count: string }>(
         `SELECT COUNT(*)::text as count FROM crm.touchpoints
-         WHERE channel = 'email' AND event_type = 'opened' ${crmDF.filter}`,
-        crmDF.params
+         WHERE org_id = $1 AND channel = 'email' AND event_type = 'opened' ${crmDF.filter}`,
+        [orgId, ...crmDF.params]
       ),
       query<{ count: string }>(
         `SELECT COUNT(*)::text as count FROM crm.touchpoints
-         WHERE channel = 'email' AND event_type = 'replied' ${crmDF.filter}`,
-        crmDF.params
+         WHERE org_id = $1 AND channel = 'email' AND event_type = 'replied' ${crmDF.filter}`,
+        [orgId, ...crmDF.params]
       ),
     ]);
 
@@ -108,8 +114,8 @@ export async function GET(request: NextRequest) {
          COALESCE(SUM(CASE WHEN open_count > 0 THEN open_count ELSE 0 END), 0)::text as total_opens,
          COUNT(*) FILTER (WHERE replied = true)::text as total_replied
        FROM bdr.email_sends
-       WHERE sent_at IS NOT NULL ${bdrDF.filter}`,
-      bdrDF.params
+       WHERE org_id = $1 AND sent_at IS NOT NULL ${bdrDF.filter}`,
+      [orgId, ...bdrDF.params]
     );
     const bdrEmailStats = bdrEmailAgg[0] || { total_sends: '0', total_opens: '0', total_replied: '0' };
 
@@ -130,8 +136,8 @@ export async function GET(request: NextRequest) {
     // Demos booked
     const demoRow = await query<{ count: string }>(
       `SELECT COUNT(*)::text as count FROM crm.calendly_events
-       WHERE cancelled = false ${demoDF.filter}`,
-      demoDF.params
+       WHERE org_id = $1 AND cancelled = false ${demoDF.filter}`,
+      [orgId, ...demoDF.params]
     );
     const demos_booked = parseInt(demoRow[0]?.count || '0');
 
@@ -139,9 +145,9 @@ export async function GET(request: NextRequest) {
     const channelDF = buildDateFilter('occurred_at');
     const channelRows = await query<{ channel: string; count: string }>(
       `SELECT channel, COUNT(*)::text as count FROM crm.touchpoints
-       WHERE 1=1 ${channelDF.filter}
+       WHERE org_id = $1 ${channelDF.filter}
        GROUP BY channel`,
-      channelDF.params
+      [orgId, ...channelDF.params]
     );
     const touchpoints_by_channel: Record<string, number> = {};
     for (const row of channelRows) {
@@ -153,9 +159,9 @@ export async function GET(request: NextRequest) {
     // ═══════════════════════════════════════════════════════════════════════════
 
     const [totalLeadRow, readyRow, bdrDemoRow] = await Promise.all([
-      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads`),
-      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads WHERE status = 'email_ready'`),
-      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads WHERE status = 'demo_booked'`),
+      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads WHERE org_id = $1`, [orgId]),
+      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads WHERE org_id = $1 AND status = 'email_ready'`, [orgId]),
+      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads WHERE org_id = $1 AND status = 'demo_booked'`, [orgId]),
     ]);
 
     // Date-scoped BDR email metrics from email_sends table
@@ -174,8 +180,8 @@ export async function GET(request: NextRequest) {
          COUNT(DISTINCT lead_id) FILTER (WHERE open_count > 0)::text as unique_opened,
          COUNT(DISTINCT lead_id) FILTER (WHERE replied = true)::text as unique_replied
        FROM bdr.email_sends
-       WHERE sent_at IS NOT NULL ${bdrScopeDF.filter}`,
-      bdrScopeDF.params
+       WHERE org_id = $1 AND sent_at IS NOT NULL ${bdrScopeDF.filter}`,
+      [orgId, ...bdrScopeDF.params]
     );
     const bdrStats = bdrScopeAgg[0] || {
       total_sends: '0', unique_sent: '0', total_opens: '0', unique_opened: '0', unique_replied: '0',
@@ -199,10 +205,10 @@ export async function GET(request: NextRequest) {
 
     // Post-demo stats
     const [pdDeals, pdDrafts, pdSent, pdReplied] = await Promise.all([
-      queryShipday<{ count: string }>(`SELECT COUNT(*)::text as count FROM shipday.deals WHERE agent_status = 'active'`),
-      queryShipday<{ count: string }>(`SELECT COUNT(*)::text as count FROM shipday.email_drafts WHERE status = 'draft'`),
-      queryShipday<{ count: string }>(`SELECT COUNT(*)::text as count FROM shipday.email_drafts WHERE status = 'sent'`),
-      queryShipday<{ count: string }>(`SELECT COUNT(*)::text as count FROM shipday.email_drafts WHERE status = 'sent' AND gmail_thread_id IS NOT NULL`),
+      queryDeals<{ count: string }>(`SELECT COUNT(*)::text as count FROM deals.deals WHERE org_id = $1 AND agent_status = 'active'`, [orgId]),
+      queryDeals<{ count: string }>(`SELECT COUNT(*)::text as count FROM deals.email_drafts WHERE org_id = $1 AND status = 'draft'`, [orgId]),
+      queryDeals<{ count: string }>(`SELECT COUNT(*)::text as count FROM deals.email_drafts WHERE org_id = $1 AND status = 'sent'`, [orgId]),
+      queryDeals<{ count: string }>(`SELECT COUNT(*)::text as count FROM deals.email_drafts WHERE org_id = $1 AND status = 'sent' AND gmail_thread_id IS NOT NULL`, [orgId]),
     ]);
     const pdSentCount = parseInt(pdSent[0]?.count || '0');
     const postDemo = {
@@ -214,10 +220,10 @@ export async function GET(request: NextRequest) {
 
     // Action items
     const [campaignsRow, tasksActRow, draftsActRow, callsRow] = await Promise.all([
-      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads WHERE status = 'email_ready'`),
-      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM crm.task_queue WHERE status = 'pending'`),
-      queryShipday<{ count: string }>(`SELECT COUNT(*)::text as count FROM shipday.email_drafts WHERE status = 'draft'`),
-      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM crm.task_queue WHERE status = 'pending' AND task_type = 'call'`),
+      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM bdr.leads WHERE org_id = $1 AND status = 'email_ready'`, [orgId]),
+      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM crm.task_queue WHERE org_id = $1 AND status = 'pending'`, [orgId]),
+      queryDeals<{ count: string }>(`SELECT COUNT(*)::text as count FROM deals.email_drafts WHERE org_id = $1 AND status = 'draft'`, [orgId]),
+      query<{ count: string }>(`SELECT COUNT(*)::text as count FROM crm.task_queue WHERE org_id = $1 AND status = 'pending' AND task_type = 'call'`, [orgId]),
     ]);
 
     const actions: { label: string; count: number; href: string; color: string }[] = [];
@@ -246,8 +252,9 @@ export async function GET(request: NextRequest) {
                 COALESCE(es.reply_sentiment, 'neutral') as reply_sentiment
          FROM bdr.email_sends es
          JOIN bdr.leads l ON l.lead_id = es.lead_id
-         WHERE es.reply_at IS NOT NULL
-         ORDER BY es.reply_at DESC LIMIT 5`
+         WHERE es.org_id = $1 AND es.reply_at IS NOT NULL
+         ORDER BY es.reply_at DESC LIMIT 5`,
+        [orgId]
       );
       replies = replyRows.map(r => ({
         lead_id: r.lead_id,
@@ -270,10 +277,10 @@ export async function GET(request: NextRequest) {
       trend = await query<{ day: string; count: string }>(
         `SELECT DATE(occurred_at) AS day, COUNT(*)::text AS count
          FROM crm.touchpoints
-         WHERE occurred_at >= NOW() - INTERVAL '1 day' * $1
+         WHERE org_id = $1 AND occurred_at >= NOW() - INTERVAL '1 day' * $2
          GROUP BY DATE(occurred_at)
          ORDER BY day ASC`,
-        [trendDays]
+        [orgId, trendDays]
       );
     } catch { /* no trend data */ }
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/bdr/chat/history?session_id=...
@@ -7,6 +8,9 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const { searchParams } = new URL(request.url);
     const sessionId = searchParams.get('session_id');
 
@@ -22,9 +26,9 @@ export async function GET(request: NextRequest) {
       }>(
         `SELECT id::text, role, content, tool_calls, tool_results, created_at::text
          FROM bdr.chat_messages
-         WHERE session_id = $1
+         WHERE session_id = $1 AND org_id = $2
          ORDER BY created_at ASC`,
-        [sessionId]
+        [sessionId, orgId]
       );
 
       return NextResponse.json({ messages });
@@ -40,8 +44,10 @@ export async function GET(request: NextRequest) {
     }>(
       `SELECT id::text, title, message_count, last_message_at::text, created_at::text
        FROM bdr.chat_sessions
+       WHERE org_id = $1
        ORDER BY last_message_at DESC
-       LIMIT 20`
+       LIMIT 20`,
+      [orgId]
     );
 
     return NextResponse.json({ sessions });
@@ -57,12 +63,15 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { title } = body;
 
     const rows = await query<{ id: string }>(
-      `INSERT INTO bdr.chat_sessions (title) VALUES ($1) RETURNING id::text`,
-      [title || 'New Chat']
+      `INSERT INTO bdr.chat_sessions (org_id, title) VALUES ($1, $2) RETURNING id::text`,
+      [orgId, title || 'New Chat']
     );
 
     return NextResponse.json({ session_id: rows[0].id, success: true });
@@ -78,6 +87,9 @@ export async function POST(request: NextRequest) {
  */
 export async function PATCH(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { session_id, role, content, tool_calls, tool_results } = body;
 
@@ -86,9 +98,9 @@ export async function PATCH(request: NextRequest) {
     }
 
     await query(
-      `INSERT INTO bdr.chat_messages (session_id, role, content, tool_calls, tool_results)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [session_id, role, content, JSON.stringify(tool_calls || null), JSON.stringify(tool_results || null)]
+      `INSERT INTO bdr.chat_messages (org_id, session_id, role, content, tool_calls, tool_results)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [orgId, session_id, role, content, JSON.stringify(tool_calls || null), JSON.stringify(tool_results || null)]
     );
 
     // Update session
@@ -96,8 +108,8 @@ export async function PATCH(request: NextRequest) {
       `UPDATE bdr.chat_sessions
        SET message_count = message_count + 1, last_message_at = NOW(),
            title = CASE WHEN message_count = 0 THEN LEFT($2, 50) ELSE title END
-       WHERE id = $1`,
-      [session_id, content]
+       WHERE id = $1 AND org_id = $3`,
+      [session_id, content, orgId]
     );
 
     return NextResponse.json({ success: true });

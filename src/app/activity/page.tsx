@@ -154,7 +154,7 @@ export default function ActivityPage() {
           onClick={() => { setNewCount(0); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
           className="w-full bg-blue-600/10 border border-blue-600/30 rounded-lg py-2 text-xs text-blue-400 hover:bg-blue-600/20 transition-colors"
         >
-          {newCount} new event{newCount > 1 ? 's' : ''} — click to scroll to top
+          {newCount} new event{newCount > 1 ? 's' : ''} - click to scroll to top
         </button>
       )}
 

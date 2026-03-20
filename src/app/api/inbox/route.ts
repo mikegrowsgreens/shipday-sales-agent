@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { InboxItem } from '@/lib/types';
+import { requireTenantSession } from '@/lib/tenant';
 
 // GET /api/inbox - Unified inbox: all inbound signals
 export async function GET(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
+
   const { searchParams } = request.nextUrl;
   const channel = searchParams.get('channel');
   const status = searchParams.get('status') || 'active';
@@ -14,6 +18,10 @@ export async function GET(request: NextRequest) {
   const conditions: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
+
+  // Org scoping
+  conditions.push(`t.org_id = $${idx++}`);
+  params.push(orgId);
 
   // Only inbound by default, or all with direction param
   const direction = searchParams.get('direction');
@@ -79,10 +87,12 @@ export async function GET(request: NextRequest) {
   const channelCounts = await query<{ channel: string; count: string }>(
     `SELECT t.channel, COUNT(*)::text as count
      FROM crm.touchpoints t
-     WHERE t.direction = 'inbound'
+     WHERE t.org_id = $1
+       AND t.direction = 'inbound'
        AND (t.inbox_status = 'active' OR t.inbox_status IS NULL)
      GROUP BY t.channel
-     ORDER BY count DESC`
+     ORDER BY count DESC`,
+    [orgId]
   );
 
   return NextResponse.json({
@@ -96,6 +106,9 @@ export async function GET(request: NextRequest) {
 
 // PATCH /api/inbox - Bulk update inbox items (archive, snooze)
 export async function PATCH(request: NextRequest) {
+  const tenant = await requireTenantSession();
+  const orgId = tenant.org_id;
+
   const body = await request.json();
   const { touchpoint_ids, action, snoozed_until } = body;
 
@@ -104,22 +117,25 @@ export async function PATCH(request: NextRequest) {
   }
 
   const placeholders = touchpoint_ids.map((_: number, i: number) => `$${i + 1}`).join(',');
+  const orgParam = touchpoint_ids.length + 1;
 
   if (action === 'archive') {
     await query(
-      `UPDATE crm.touchpoints SET inbox_status = 'archived' WHERE touchpoint_id IN (${placeholders})`,
-      touchpoint_ids
+      `UPDATE crm.touchpoints SET inbox_status = 'archived' WHERE touchpoint_id IN (${placeholders}) AND org_id = $${orgParam}`,
+      [...touchpoint_ids, orgId]
     );
   } else if (action === 'snooze') {
+    const snoozedParam = touchpoint_ids.length + 1;
+    const orgParamSnooze = touchpoint_ids.length + 2;
     await query(
-      `UPDATE crm.touchpoints SET inbox_status = 'snoozed', snoozed_until = $${touchpoint_ids.length + 1}
-       WHERE touchpoint_id IN (${placeholders})`,
-      [...touchpoint_ids, snoozed_until || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()]
+      `UPDATE crm.touchpoints SET inbox_status = 'snoozed', snoozed_until = $${snoozedParam}
+       WHERE touchpoint_id IN (${placeholders}) AND org_id = $${orgParamSnooze}`,
+      [...touchpoint_ids, snoozed_until || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), orgId]
     );
   } else if (action === 'unarchive') {
     await query(
-      `UPDATE crm.touchpoints SET inbox_status = 'active', snoozed_until = NULL WHERE touchpoint_id IN (${placeholders})`,
-      touchpoint_ids
+      `UPDATE crm.touchpoints SET inbox_status = 'active', snoozed_until = NULL WHERE touchpoint_id IN (${placeholders}) AND org_id = $${orgParam}`,
+      [...touchpoint_ids, orgId]
     );
   }
 

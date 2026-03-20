@@ -1,38 +1,20 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Bot, Mail, BarChart3, Loader2, Users, Search, Building2, MapPin, Star, Activity, Eye, MousePointerClick, MessageSquare, Send, ShieldAlert, Globe, Layers, Zap, Rocket, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Pencil, Check, X, AlertTriangle, Copy, Calendar, BookTemplate } from 'lucide-react';
+import { Bot, Mail, BarChart3, Loader2, Users, Search, Building2, MapPin, Star, Activity, Eye, MessageSquare, Send, ShieldAlert, Layers, Zap, Rocket, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Pencil, Check, X, Workflow } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 import CampaignCard from '@/components/outbound/CampaignCard';
 import CampaignFilters from '@/components/outbound/CampaignFilters';
-import BdrOverview from '@/components/outbound/BdrOverview';
 import AiChatPanel from '@/components/ui/AiChatPanel';
-import DateRangeSelector from '@/components/ui/DateRangeSelector';
 import SendTimePreferences, { getDefaultTiming, computeSendAt } from '@/components/ui/SendTimePreferences';
 import type { SendTiming } from '@/components/ui/SendTimePreferences';
-import ScraperPanel from '@/components/outbound/ScraperPanel';
-import TierCampaignEditor from '@/components/outbound/TierCampaignEditor';
-import SendTimeInsights from '@/components/outbound/SendTimeInsights';
 import LeadDetailDrawer from '@/components/outbound/LeadDetailDrawer';
-import CampaignDashboard from '@/components/outbound/CampaignDashboard';
-import SendCalendar from '@/components/outbound/SendCalendar';
-import TemplateLibrary from '@/components/outbound/TemplateLibrary';
+import PendingFollowups from '@/components/outbound/PendingFollowups';
+import SequencesHub from '@/components/outbound/SequencesHub';
+import OutboundAnalytics from '@/components/outbound/OutboundAnalytics';
 import type { BdrLead } from '@/lib/types';
 
-type Tab = 'queue' | 'tiers' | 'leads' | 'tracker' | 'activity' | 'overview' | 'calendar' | 'templates' | 'scraper';
-
-interface ActivitySend {
-  id: string;
-  lead_id: number;
-  subject: string;
-  angle: string;
-  sent_at: string;
-  open_count: number;
-  replied: boolean;
-  reply_at: string | null;
-  business_name: string;
-  contact_email: string;
-}
+type Tab = 'queue' | 'sequences' | 'leads' | 'analytics';
 
 interface LeadSend {
   id: string;
@@ -115,11 +97,6 @@ export default function OutboundPage() {
   // Send timing
   const [sendTiming, setSendTiming] = useState<SendTiming>(getDefaultTiming());
 
-  // Activity state
-  const [sends, setSends] = useState<ActivitySend[]>([]);
-  const [activityLoading, setActivityLoading] = useState(false);
-  const [activityRange, setActivityRange] = useState('30d');
-
   // Leads tab state
   const [leadRows, setLeadRows] = useState<LeadRow[]>([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
@@ -142,13 +119,6 @@ export default function OutboundPage() {
   const [editField, setEditField] = useState<string>('');
   const [editValue, setEditValue] = useState<string>('');
   const [saving, setSaving] = useState(false);
-
-  // Tracker tab state
-  const [trackerData, setTrackerData] = useState<Record<string, unknown> | null>(null);
-  const [trackerLoading, setTrackerLoading] = useState(false);
-  const [trackerRange, setTrackerRange] = useState('30d');
-  const [trackerFrom, setTrackerFrom] = useState('');
-  const [trackerTo, setTrackerTo] = useState('');
 
   // Send history per lead
   const [leadSends, setLeadSends] = useState<Record<string, LeadSend[]>>({});
@@ -270,48 +240,13 @@ export default function OutboundPage() {
     }
   };
 
-  const fetchTracker = useCallback(async () => {
-    setTrackerLoading(true);
-    try {
-      const params = new URLSearchParams({ range: trackerRange });
-      if (trackerFrom) params.set('from', trackerFrom);
-      if (trackerTo) params.set('to', trackerTo);
-      const res = await fetch(`/api/bdr/tracker?${params}`);
-      const data = await res.json();
-      setTrackerData(data);
-    } catch (err) {
-      console.error('[tracker] fetch error:', err);
-    } finally {
-      setTrackerLoading(false);
-    }
-  }, [trackerRange, trackerFrom, trackerTo]);
-
   useEffect(() => {
     if (tab === 'queue') fetchLeads();
   }, [tab, fetchLeads]);
 
-
   useEffect(() => {
     if (tab === 'leads') fetchLeadRows();
   }, [tab, fetchLeadRows]);
-
-  useEffect(() => {
-    if (tab === 'tracker') fetchTracker();
-  }, [tab, fetchTracker]);
-
-  const fetchActivity = useCallback(async () => {
-    setActivityLoading(true);
-    try {
-      const res = await fetch(`/api/bdr/activity?range=${activityRange}`);
-      const data = await res.json();
-      setSends(data.sends || []);
-    } catch (err) { console.error(err); }
-    finally { setActivityLoading(false); }
-  }, [activityRange]);
-
-  useEffect(() => {
-    if (tab === 'activity') fetchActivity();
-  }, [tab, fetchActivity]);
 
   const handleSelect = (id: string) => {
     setSelectedIds(prev => {
@@ -434,7 +369,7 @@ export default function OutboundPage() {
         body: JSON.stringify({ limit: enrichBatch }),
       });
       if (!res.ok) {
-        addToast('Enrichment failed — check logs', 'error');
+        addToast('Enrichment failed - check logs', 'error');
         setBulkEnriching(false);
         return;
       }
@@ -472,7 +407,7 @@ export default function OutboundPage() {
             // All done
             setEnrichProgress(prev => prev ? { ...prev, active: false, counts, leads } : null);
             setBulkEnriching(false);
-            addToast(`Enriched ${total} leads — ${counts.scored || 0} scored, ${counts.enriched || 0} enriched`, 'success');
+            addToast(`Enriched ${total} leads - ${counts.scored || 0} scored, ${counts.enriched || 0} enriched`, 'success');
             fetchLeadRows();
             return true; // signal done
           }
@@ -506,7 +441,7 @@ export default function OutboundPage() {
       }
     } catch (err) {
       console.error('[outbound] bulk enrich error:', err);
-      addToast('Enrichment failed — network error', 'error');
+      addToast('Enrichment failed - network error', 'error');
       setBulkEnriching(false);
     }
   };
@@ -551,11 +486,11 @@ export default function OutboundPage() {
         setTab('queue');
         setTimeout(() => fetchLeadRows(), 2000);
       } else {
-        updateToast(toastId, 'Enrollment failed — check logs', 'error');
+        updateToast(toastId, 'Enrollment failed - check logs', 'error');
       }
     } catch (err) {
       console.error('[outbound] enroll all error:', err);
-      updateToast(toastId, 'Enrollment failed — network error', 'error');
+      updateToast(toastId, 'Enrollment failed - network error', 'error');
     } finally {
       setBulkEnrolling(false);
     }
@@ -563,14 +498,9 @@ export default function OutboundPage() {
 
   const tabs: { key: Tab; label: string; icon: typeof Mail }[] = [
     { key: 'queue', label: 'Queue', icon: Mail },
-    { key: 'tiers', label: 'By Tier', icon: Layers },
+    { key: 'sequences', label: 'Sequences', icon: Workflow },
     { key: 'leads', label: 'Leads', icon: Users },
-    { key: 'tracker', label: 'Tracker', icon: Activity },
-    { key: 'activity', label: 'Activity', icon: Mail },
-    { key: 'overview', label: 'Overview', icon: BarChart3 },
-    { key: 'calendar', label: 'Calendar', icon: Calendar },
-    { key: 'templates', label: 'Templates', icon: BookTemplate },
-    { key: 'scraper', label: 'Scraper', icon: Globe },
+    { key: 'analytics', label: 'Analytics', icon: BarChart3 },
   ];
 
   return (
@@ -641,6 +571,9 @@ export default function OutboundPage() {
             showDeviation={true}
           />
 
+          {/* Pending Follow-ups Queue */}
+          <PendingFollowups />
+
           {loading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
@@ -669,8 +602,8 @@ export default function OutboundPage() {
         </div>
       )}
 
-      {/* By Tier Tab — Campaign Templates Editor */}
-      {tab === 'tiers' && <TierCampaignEditor />}
+      {/* Sequences Tab */}
+      {tab === 'sequences' && <SequencesHub />}
 
       {/* Leads Tab */}
       {tab === 'leads' && (
@@ -990,7 +923,7 @@ export default function OutboundPage() {
               {/* Elapsed time */}
               {enrichProgress.active && (
                 <div className="px-4 py-2 border-t border-gray-800 text-[10px] text-gray-500">
-                  Polling every 8s — enrichment runs in background via n8n
+                  Polling every 8s - enrichment runs in background via n8n
                 </div>
               )}
             </div>
@@ -1288,305 +1221,8 @@ export default function OutboundPage() {
         </div>
       )}
 
-      {/* Tracker Tab */}
-      {tab === 'tracker' && (
-        <div className="space-y-4">
-          {/* Date range selector */}
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-300">Email Tracking</h2>
-            <DateRangeSelector
-              value={trackerRange}
-              onChange={(range, from, to) => {
-                setTrackerRange(range);
-                setTrackerFrom(from || '');
-                setTrackerTo(to || '');
-              }}
-            />
-          </div>
-
-          {trackerLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
-            </div>
-          ) : trackerData ? (
-            <>
-              {/* Summary KPIs */}
-              {(() => {
-                const s = (trackerData.summary || {}) as Record<string, string>;
-                return (
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-                      <Send className="w-4 h-4 text-blue-400 mx-auto mb-1" />
-                      <div className="text-xl font-bold text-white">{s.total_sent || '0'}</div>
-                      <div className="text-[10px] text-gray-500 uppercase">Sent</div>
-                    </div>
-                    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-                      <Eye className="w-4 h-4 text-yellow-400 mx-auto mb-1" />
-                      <div className="text-xl font-bold text-white">{s.total_opened || '0'}</div>
-                      <div className="text-[10px] text-gray-500 uppercase">Opened ({s.open_rate || '0'}%)</div>
-                    </div>
-                    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-                      <MousePointerClick className="w-4 h-4 text-cyan-400 mx-auto mb-1" />
-                      <div className="text-xl font-bold text-white">{s.total_clicked || '0'}</div>
-                      <div className="text-[10px] text-gray-500 uppercase">Clicked ({s.click_rate || '0'}%)</div>
-                    </div>
-                    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-                      <MessageSquare className="w-4 h-4 text-green-400 mx-auto mb-1" />
-                      <div className="text-xl font-bold text-white">{s.total_replied || '0'}</div>
-                      <div className="text-[10px] text-gray-500 uppercase">Replied ({s.reply_rate || '0'}%)</div>
-                    </div>
-                    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-                      <Activity className="w-4 h-4 text-purple-400 mx-auto mb-1" />
-                      <div className="text-xl font-bold text-white">{s.total_opens || '0'}</div>
-                      <div className="text-[10px] text-gray-500 uppercase">Total Opens</div>
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Daily trend */}
-              {(() => {
-                const trend = (trackerData.trend || []) as Array<{ day: string; sent: number; opened: number; replied: number }>;
-                if (trend.length === 0) return null;
-                const maxSent = Math.max(...trend.map(t => t.sent), 1);
-                return (
-                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                    <h3 className="text-xs font-semibold text-gray-400 mb-3">Daily Volume</h3>
-                    <div className="flex items-end gap-1 h-32">
-                      {trend.map(t => (
-                        <div key={t.day} className="flex-1 flex flex-col items-center gap-1 group relative">
-                          <div className="w-full flex flex-col justify-end h-24 gap-px">
-                            <div
-                              className="w-full bg-blue-600 rounded-t"
-                              style={{ height: `${(t.sent / maxSent) * 100}%`, minHeight: t.sent > 0 ? '2px' : '0' }}
-                            />
-                          </div>
-                          <span className="text-[8px] text-gray-600 -rotate-45 origin-top-left whitespace-nowrap">
-                            {new Date(t.day).toLocaleDateString('en', { month: 'short', day: 'numeric' })}
-                          </span>
-                          <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-gray-800 text-gray-300 text-[9px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 whitespace-nowrap z-10">
-                            {t.sent} sent, {t.opened} opened, {t.replied} replied
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="flex items-center gap-4 mt-2">
-                      <span className="flex items-center gap-1 text-[10px] text-gray-500">
-                        <div className="w-2 h-2 bg-blue-600 rounded" /> Sent
-                      </span>
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Angle performance */}
-              {(() => {
-                const anglePerf = (trackerData.anglePerf || []) as Array<Record<string, string>>;
-                const angleLabels: Record<string, string> = {
-                  missed_calls: 'Missed Calls', commission_savings: 'Commission',
-                  delivery_ops: 'Delivery Ops', tech_consolidation: 'Tech Stack',
-                  customer_experience: 'CX',
-                };
-                if (anglePerf.length === 0) return null;
-                return (
-                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                    <h3 className="text-xs font-semibold text-gray-400 mb-3">Angle Performance</h3>
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-gray-500">
-                          <th className="text-left py-1.5">Angle</th>
-                          <th className="text-right py-1.5">Sent</th>
-                          <th className="text-right py-1.5">Opens</th>
-                          <th className="text-right py-1.5">Clicks</th>
-                          <th className="text-right py-1.5">Replies</th>
-                          <th className="text-right py-1.5">Open %</th>
-                          <th className="text-right py-1.5">Reply %</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {anglePerf.map(a => (
-                          <tr key={a.angle} className="border-t border-gray-800">
-                            <td className="py-1.5 text-gray-300">{angleLabels[a.angle] || a.angle}</td>
-                            <td className="py-1.5 text-right text-white">{a.sent}</td>
-                            <td className="py-1.5 text-right text-yellow-400">{a.opens}</td>
-                            <td className="py-1.5 text-right text-cyan-400">{a.clicks}</td>
-                            <td className="py-1.5 text-right text-green-400">{a.replies}</td>
-                            <td className="py-1.5 text-right text-white">{a.open_rate || '0'}%</td>
-                            <td className="py-1.5 text-right text-white">{a.reply_rate || '0'}%</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })()}
-
-              {/* Email activity feed */}
-              {(() => {
-                const emails = (trackerData.emails || []) as Array<Record<string, unknown>>;
-                return (
-                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                    <h3 className="text-xs font-semibold text-gray-400 mb-3">Email Activity ({emails.length})</h3>
-                    <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                      {emails.map((email) => (
-                        <div key={String(email.id)} className="flex items-center gap-3 p-2 bg-gray-800/30 rounded-lg hover:bg-gray-800/50">
-                          {/* Status indicators */}
-                          <div className="flex items-center gap-1 shrink-0">
-                            <Send className="w-3 h-3 text-blue-400" />
-                            {(email.open_count as number) > 0 && (
-                              <Eye className="w-3 h-3 text-yellow-400" />
-                            )}
-                            {(email.click_count as number) > 0 && (
-                              <MousePointerClick className="w-3 h-3 text-cyan-400" />
-                            )}
-                            {Boolean(email.replied) && (
-                              <MessageSquare className="w-3 h-3 text-green-400" />
-                            )}
-                          </div>
-
-                          {/* Email info */}
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-medium text-white truncate">
-                                {String(email.business_name || email.to_email || '--')}
-                              </span>
-                              {String(email.angle || '') && (
-                                <span className="text-[10px] text-gray-600">{String(email.angle || '').replace(/_/g, ' ')}</span>
-                              )}
-                            </div>
-                            <p className="text-[10px] text-gray-500 truncate">{String(email.subject || '')}</p>
-                          </div>
-
-                          {/* Tracking details */}
-                          <div className="text-right shrink-0">
-                            <div className="text-[10px] text-gray-500">
-                              {email.sent_at ? new Date(String(email.sent_at)).toLocaleDateString() : '--'}
-                            </div>
-                            {(email.open_count as number) > 0 && (
-                              <div className="text-[10px] text-yellow-400">
-                                {String(email.open_count)} open{(email.open_count as number) !== 1 ? 's' : ''}
-                              </div>
-                            )}
-                            {String(email.reply_sentiment || '') && (
-                              <div className={`text-[10px] ${
-                                String(email.reply_sentiment) === 'positive' ? 'text-green-400' :
-                                String(email.reply_sentiment) === 'negative' ? 'text-red-400' : 'text-gray-400'
-                              }`}>
-                                {String(email.reply_sentiment)}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                      {emails.length === 0 && (
-                        <p className="text-gray-500 text-center py-4">No emails sent in this period</p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Live events feed */}
-              {(() => {
-                const events = (trackerData.events || []) as Array<Record<string, unknown>>;
-                if (events.length === 0) return null;
-                const eventIcons: Record<string, { icon: typeof Eye; color: string }> = {
-                  open: { icon: Eye, color: 'text-yellow-400' },
-                  click: { icon: MousePointerClick, color: 'text-cyan-400' },
-                  reply: { icon: MessageSquare, color: 'text-green-400' },
-                  bounce: { icon: Mail, color: 'text-red-400' },
-                  unsubscribe: { icon: Mail, color: 'text-red-500' },
-                };
-                return (
-                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                    <h3 className="text-xs font-semibold text-gray-400 mb-3">Live Events</h3>
-                    <div className="space-y-1.5">
-                      {events.map(ev => {
-                        const config = eventIcons[String(ev.event_type)] || { icon: Activity, color: 'text-gray-400' };
-                        const Icon = config.icon;
-                        return (
-                          <div key={String(ev.event_id)} className="flex items-center gap-2 text-xs">
-                            <Icon className={`w-3 h-3 ${config.color} shrink-0`} />
-                            <span className="text-gray-300">{String(ev.business_name || ev.to_email || '--')}</span>
-                            <span className={`${config.color} font-medium`}>{String(ev.event_type)}</span>
-                            <span className="text-gray-600 ml-auto">
-                              {ev.event_at ? new Date(String(ev.event_at)).toLocaleString() : '--'}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })()}
-            </>
-          ) : (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
-              <p className="text-gray-500">No tracking data available</p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Activity Tab */}
-      {tab === 'activity' && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-300">Email Activity</h2>
-            <DateRangeSelector
-              value={activityRange}
-              onChange={(range) => setActivityRange(range)}
-            />
-          </div>
-          {activityLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
-            </div>
-          ) : sends.length === 0 ? (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
-              <p className="text-gray-500">No email activity yet</p>
-            </div>
-          ) : (
-            sends.map(send => (
-              <div key={send.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm font-medium text-white">{send.business_name}</span>
-                  <span className="text-xs text-gray-500">
-                    {send.sent_at ? new Date(send.sent_at).toLocaleDateString() : '--'}
-                  </span>
-                </div>
-                <p className="text-xs text-gray-400 mb-2">{send.subject}</p>
-                <div className="flex items-center gap-3 text-xs">
-                  <span className="text-gray-500">{send.contact_email}</span>
-                  {send.open_count > 0 && (
-                    <span className="text-yellow-400">Opened {send.open_count}x</span>
-                  )}
-                  {send.replied && (
-                    <span className="text-green-400">Replied</span>
-                  )}
-                  {send.angle && (
-                    <span className="text-gray-600">{send.angle.replace(/_/g, ' ')}</span>
-                  )}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      )}
-
-      {tab === 'overview' && (
-        <div className="space-y-6">
-          <BdrOverview />
-          <CampaignDashboard />
-          <SendTimeInsights />
-        </div>
-      )}
-
-      {tab === 'calendar' && <SendCalendar />}
-
-      {tab === 'templates' && <TemplateLibrary />}
-
-      {tab === 'scraper' && <ScraperPanel />}
+      {/* Analytics Tab */}
+      {tab === 'analytics' && <OutboundAnalytics />}
 
       {/* AI Chat Panel */}
       <AiChatPanel

@@ -1,19 +1,21 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { Contact } from '@/lib/types';
+import { withAuthGet } from '@/lib/route-auth';
 
 // GET /api/contacts/duplicates - Detect duplicate contacts
-export async function GET() {
+export const GET = withAuthGet(async ({ orgId }) => {
   // Find duplicates by email
   const emailDupes = await query<{ email: string; count: string; contact_ids: number[] }>(
     `SELECT LOWER(email) as email, COUNT(*)::text as count,
             array_agg(contact_id ORDER BY updated_at DESC) as contact_ids
      FROM crm.contacts
-     WHERE email IS NOT NULL AND email != ''
+     WHERE email IS NOT NULL AND email != '' AND org_id = $1
      GROUP BY LOWER(email)
      HAVING COUNT(*) > 1
      ORDER BY COUNT(*) DESC
-     LIMIT 50`
+     LIMIT 50`,
+    [orgId]
   );
 
   // Find duplicates by phone (normalized)
@@ -21,11 +23,12 @@ export async function GET() {
     `SELECT REGEXP_REPLACE(phone, '\\D', '', 'g') as phone, COUNT(*)::text as count,
             array_agg(contact_id ORDER BY updated_at DESC) as contact_ids
      FROM crm.contacts
-     WHERE phone IS NOT NULL AND phone != ''
+     WHERE phone IS NOT NULL AND phone != '' AND org_id = $1
      GROUP BY REGEXP_REPLACE(phone, '\\D', '', 'g')
      HAVING COUNT(*) > 1 AND LENGTH(REGEXP_REPLACE(phone, '\\D', '', 'g')) >= 10
      ORDER BY COUNT(*) DESC
-     LIMIT 50`
+     LIMIT 50`,
+    [orgId]
   );
 
   // Find duplicates by business name (fuzzy)
@@ -33,11 +36,12 @@ export async function GET() {
     `SELECT LOWER(TRIM(business_name)) as business_name, COUNT(*)::text as count,
             array_agg(contact_id ORDER BY updated_at DESC) as contact_ids
      FROM crm.contacts
-     WHERE business_name IS NOT NULL AND business_name != ''
+     WHERE business_name IS NOT NULL AND business_name != '' AND org_id = $1
      GROUP BY LOWER(TRIM(business_name))
      HAVING COUNT(*) > 1
      ORDER BY COUNT(*) DESC
-     LIMIT 50`
+     LIMIT 50`,
+    [orgId]
   );
 
   // Collect all unique contact IDs
@@ -52,8 +56,8 @@ export async function GET() {
     const ids = Array.from(allIds);
     const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
     const contacts = await query<Contact>(
-      `SELECT * FROM crm.contacts WHERE contact_id IN (${placeholders})`,
-      ids
+      `SELECT * FROM crm.contacts WHERE contact_id IN (${placeholders}) AND org_id = $${ids.length + 1}`,
+      [...ids, orgId]
     );
     contactMap = Object.fromEntries(contacts.map(c => [c.contact_id, c]));
   }
@@ -82,4 +86,4 @@ export async function GET() {
     total_groups: groups.length,
     total_duplicates: allIds.size,
   });
-}
+});

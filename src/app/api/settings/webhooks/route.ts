@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, query } from '@/lib/db';
-import { getTenantFromSession } from '@/lib/tenant';
+import { requireTenantSession } from '@/lib/tenant';
 import { isPrivateUrl } from '@/lib/ssrf';
+import { webhookConfigSchema } from '@/lib/validators/settings';
 
 interface WebhookConfig {
   id: string;
@@ -19,8 +20,8 @@ interface WebhookConfig {
  */
 export async function GET() {
   try {
-    const tenant = await getTenantFromSession();
-    const orgId = tenant?.org_id || 1;
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
 
     const org = await queryOne<{ settings: Record<string, unknown> }>(
       `SELECT settings FROM crm.organizations WHERE org_id = $1`,
@@ -44,18 +45,18 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
-    const tenant = await getTenantFromSession();
-    if (tenant && tenant.role !== 'admin') {
+    const tenant = await requireTenantSession();
+    if (tenant.role !== 'admin') {
       return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
     }
-    const orgId = tenant?.org_id || 1;
+    const orgId = tenant.org_id;
 
     const body = await request.json();
-    const { action, url, webhooks } = body as {
-      action: 'test' | 'save';
-      url?: string;
-      webhooks?: WebhookConfig[];
-    };
+    const parsed = webhookConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
+    }
+    const { action, url, webhooks } = parsed.data;
 
     if (action === 'test' && url) {
       // SSRF prevention: block private/internal URLs

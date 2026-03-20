@@ -1,15 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { getTenantFromSession } from '@/lib/tenant';
+import { requireTenantSession } from '@/lib/tenant';
 import { hashPassword } from '@/lib/auth';
 
 export async function GET() {
   try {
-    const tenant = await getTenantFromSession();
+    const tenant = await requireTenantSession();
 
-    if (!tenant) {
-      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
-    }
     if (tenant.role !== 'admin') {
       return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
     }
@@ -40,11 +37,8 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const tenant = await getTenantFromSession();
+    const tenant = await requireTenantSession();
 
-    if (!tenant) {
-      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
-    }
     if (tenant.role !== 'admin') {
       return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
     }

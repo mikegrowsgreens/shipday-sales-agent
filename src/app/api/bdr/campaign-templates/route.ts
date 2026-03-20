@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 interface TemplateStep {
   step_number: number;
@@ -18,6 +19,10 @@ interface CampaignTemplate {
   steps: TemplateStep[];
   is_active: boolean;
   auto_approve_score_threshold: number | null;
+  is_library_template: boolean;
+  variant: string | null;
+  auto_assignable: boolean;
+  thread_theme: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -26,13 +31,19 @@ interface CampaignTemplate {
  * GET /api/bdr/campaign-templates
  * Returns all campaign templates grouped by tier.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+    const includeInactive = request.nextUrl.searchParams.get('include_inactive') === 'true';
+    const activeFilter = includeInactive ? '' : 'AND is_active = true';
     const templates = await query<CampaignTemplate>(
-      `SELECT id, tier, name, description, steps, is_active, auto_approve_score_threshold, created_at, updated_at
+      `SELECT id, tier, name, description, steps, is_active, auto_approve_score_threshold,
+              is_library_template, variant, auto_assignable, thread_theme, created_at, updated_at
        FROM bdr.campaign_templates
-       WHERE is_active = true
-       ORDER BY tier, id`
+       WHERE org_id = $1 ${activeFilter}
+       ORDER BY tier, is_library_template DESC, variant, id`,
+      [orgId]
     );
 
     return NextResponse.json({ templates });
@@ -48,6 +59,8 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { tier, name, description, steps } = await request.json();
 
     if (!tier || !name) {
@@ -55,10 +68,10 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await query<CampaignTemplate>(
-      `INSERT INTO bdr.campaign_templates (tier, name, description, steps)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO bdr.campaign_templates (tier, name, description, steps, org_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [tier, name, description || null, JSON.stringify(steps || [])]
+      [tier, name, description || null, JSON.stringify(steps || []), orgId]
     );
 
     return NextResponse.json({ template: result[0] });
@@ -74,7 +87,9 @@ export async function POST(request: NextRequest) {
  */
 export async function PUT(request: NextRequest) {
   try {
-    const { id, name, description, steps, auto_approve_score_threshold } = await request.json();
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+    const { id, name, description, steps, auto_approve_score_threshold, thread_theme, campaign_notes, generation_mode } = await request.json();
 
     if (!id) {
       return NextResponse.json({ error: 'id is required' }, { status: 400 });
@@ -100,11 +115,26 @@ export async function PUT(request: NextRequest) {
       fields.push(`auto_approve_score_threshold = $${pi++}`);
       params.push(auto_approve_score_threshold);
     }
+    if (thread_theme !== undefined) {
+      fields.push(`thread_theme = $${pi++}`);
+      params.push(thread_theme || null);
+    }
+    if (campaign_notes !== undefined) {
+      fields.push(`campaign_notes = $${pi++}`);
+      params.push(campaign_notes || null);
+    }
+    if (generation_mode !== undefined) {
+      fields.push(`generation_mode = $${pi++}`);
+      params.push(generation_mode);
+    }
     fields.push('updated_at = NOW()');
     params.push(id);
+    const idIdx = pi;
+    pi++;
+    params.push(orgId);
 
     const result = await query<CampaignTemplate>(
-      `UPDATE bdr.campaign_templates SET ${fields.join(', ')} WHERE id = $${pi} RETURNING *`,
+      `UPDATE bdr.campaign_templates SET ${fields.join(', ')} WHERE id = $${idIdx} AND org_id = $${pi} RETURNING *`,
       params
     );
 

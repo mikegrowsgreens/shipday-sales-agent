@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { generateEmail, loadEmailBrainContext } from '@/lib/ai';
 import { randomUUID } from 'crypto';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/bdr/campaigns/ab-test
@@ -17,6 +18,8 @@ import { randomUUID } from 'crypto';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { lead_ids, variant_a, variant_b, auto_split = false } = body;
 
@@ -47,8 +50,8 @@ export async function POST(request: NextRequest) {
       `SELECT lead_id, business_name, contact_name, city, state, tier,
               cuisine_type, google_rating, google_review_count,
               email_subject, email_body
-       FROM bdr.leads WHERE lead_id IN (${placeholders})`,
-      lead_ids
+       FROM bdr.leads WHERE lead_id IN (${placeholders}) AND org_id = $${lead_ids.length + 1}`,
+      [...lead_ids, orgId]
     );
 
     if (leads.length === 0) {
@@ -113,8 +116,8 @@ export async function POST(request: NextRequest) {
         `UPDATE bdr.leads
          SET email_subject = $1, email_body = $2, email_angle = $3,
              email_variant_id = $4, status = 'email_ready', updated_at = NOW()
-         WHERE lead_id = $5`,
-        [activeEmail.subject, activeEmail.body, activeAngle, `ab_${assignedVariant}_${abTestId.slice(0, 8)}`, lead.lead_id]
+         WHERE lead_id = $5 AND org_id = $6`,
+        [activeEmail.subject, activeEmail.body, activeAngle, `ab_${assignedVariant}_${abTestId.slice(0, 8)}`, lead.lead_id, orgId]
       );
 
       results.push({

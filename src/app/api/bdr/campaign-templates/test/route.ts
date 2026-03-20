@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { generateEmail } from '@/lib/ai';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/bdr/campaign-templates/test
@@ -10,6 +11,8 @@ import { generateEmail } from '@/lib/ai';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { step, lead_id, tier } = await request.json();
 
     if (!step || !step.angle) {
@@ -22,18 +25,21 @@ export async function POST(request: NextRequest) {
       const rows = await query<Record<string, unknown>>(
         `SELECT lead_id, business_name, contact_name, contact_email, city, state,
                 tier, cuisine_type, google_rating, google_review_count
-         FROM bdr.leads WHERE lead_id = $1`,
-        [lead_id]
+         FROM bdr.leads WHERE lead_id = $1 AND org_id = $2`,
+        [lead_id, orgId]
       );
       lead = rows[0];
     } else {
       // Pick a random lead from the tier (or any email_ready lead)
       const conditions = ["status = 'email_ready'"];
       const params: unknown[] = [];
+      let pi = 1;
       if (tier) {
-        conditions.push('tier = $1');
+        conditions.push(`tier = $${pi++}`);
         params.push(tier);
       }
+      conditions.push(`org_id = $${pi++}`);
+      params.push(orgId);
       const rows = await query<Record<string, unknown>>(
         `SELECT lead_id, business_name, contact_name, contact_email, city, state,
                 tier, cuisine_type, google_rating, google_review_count

@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Loader2, Sparkles, Calendar, Phone, Mail, Video, FileText, ExternalLink, Archive, PhoneCall, Plus, Inbox, RefreshCw, Link2 } from 'lucide-react';
+import { ArrowLeft, Loader2, Sparkles, Calendar, Phone, Mail, Video, FileText, ExternalLink, Archive, PhoneCall, Plus, Inbox, RefreshCw, CalendarPlus } from 'lucide-react';
 import CampaignTimeline from '@/components/followups/CampaignTimeline';
+import TimeSlotPicker, { type BookingResult } from '@/components/scheduling/TimeSlotPicker';
 
 interface Deal {
   deal_id: string;
@@ -79,6 +80,8 @@ export default function DealDetailPage() {
   const [fetchingEmail, setFetchingEmail] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [syncingCalls, setSyncingCalls] = useState(false);
+  const [showBookingPicker, setShowBookingPicker] = useState(false);
+  const [bookingAndCampaign, setBookingAndCampaign] = useState(false);
 
   const fetchDeal = useCallback(async () => {
     try {
@@ -173,6 +176,50 @@ export default function DealDetailPage() {
       console.error('[sync calls] error:', err);
     } finally {
       setSyncingCalls(false);
+    }
+  };
+
+  const handleBookingConfirmed = async (booking: BookingResult) => {
+    // Auto-set the "Next Follow-Up Call" date from the booked slot
+    const bookedDate = new Date(booking.starts_at);
+    const localDateStr = bookedDate.toISOString().slice(0, 16);
+    setNextCallDate(localDateStr);
+
+    // Save the call date to the deal
+    try {
+      await fetch(`/api/followups/deals/${dealId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ next_touch_due: bookedDate.toISOString() }),
+      });
+      setDeal(prev => prev ? { ...prev, next_touch_due: bookedDate.toISOString() } : prev);
+    } catch (err) {
+      console.error('[booking] Failed to save call date:', err);
+    }
+
+    // If "Book Call & Start Campaign" was triggered, generate campaign after booking
+    if (bookingAndCampaign) {
+      setBookingAndCampaign(false);
+      setShowBookingPicker(false);
+      setGenerating(true);
+      try {
+        const res = await fetch('/api/followups/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deal_id: dealId,
+            next_call_date: bookedDate.toISOString(),
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setDrafts(data.drafts || []);
+        }
+      } finally {
+        setGenerating(false);
+      }
+    } else {
+      setShowBookingPicker(false);
     }
   };
 
@@ -436,14 +483,14 @@ export default function DealDetailPage() {
                         ? 'bg-green-600/20 text-green-400 border border-green-600/30'
                         : 'bg-blue-600/20 text-blue-400 border border-blue-600/30'
                     }`}>
-                      {isSent ? 'MP' : (deal.contact_name?.charAt(0)?.toUpperCase() || '?')}
+                      {isSent ? 'You' : (deal.contact_name?.charAt(0)?.toUpperCase() || '?')}
                     </div>
 
                     <div className="flex-1 min-w-0">
                       {/* Header */}
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-xs font-medium text-gray-200">
-                          {isSent ? 'Mike Paulus' : (deal.contact_name || email.from || 'Contact')}
+                          {isSent ? 'You' : (deal.contact_name || email.from || 'Contact')}
                         </span>
                         <span className={`text-[9px] px-1.5 py-0.5 rounded ${
                           isSent ? 'bg-green-600/10 text-green-400' : 'bg-blue-600/10 text-blue-400'
@@ -573,7 +620,7 @@ export default function DealDetailPage() {
         </div>
 
       {/* Next Follow-Up Call */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <PhoneCall className="w-4 h-4 text-green-400" />
@@ -584,17 +631,29 @@ export default function DealDetailPage() {
               </span>
             )}
           </div>
-          <a
-            href={`${process.env.NEXT_PUBLIC_CALENDLY_URL || 'https://calendly.com/mike-paulus-shipday/30min'}?name=${encodeURIComponent(deal.contact_name || '')}&email=${encodeURIComponent(deal.contact_email || '')}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-600/30 text-blue-400 text-xs px-3 py-1.5 rounded-lg transition-colors"
-          >
-            <Link2 className="w-3 h-3" />
-            Book via Calendly
-          </a>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setBookingAndCampaign(false); setShowBookingPicker(!showBookingPicker); }}
+              className="flex items-center gap-1.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-600/30 text-blue-400 text-xs px-3 py-1.5 rounded-lg transition-colors"
+            >
+              <CalendarPlus className="w-3 h-3" />
+              {showBookingPicker ? 'Hide Picker' : 'Book Call'}
+            </button>
+            {!drafts.length && (
+              <button
+                onClick={() => { setBookingAndCampaign(true); setShowBookingPicker(true); }}
+                disabled={generating}
+                className="flex items-center gap-1.5 bg-green-600/20 hover:bg-green-600/30 border border-green-600/30 text-green-400 text-xs px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <Sparkles className="w-3 h-3" />
+                Book Call & Start Campaign
+              </button>
+            )}
+          </div>
         </div>
-        <div className="flex items-center gap-3 mt-2">
+
+        {/* Manual date input */}
+        <div className="flex items-center gap-3">
           <input
             type="datetime-local"
             value={nextCallDate}
@@ -618,8 +677,31 @@ export default function DealDetailPage() {
             </span>
           )}
         </div>
-        {nextCallDate && !drafts.length && (
-          <p className="text-[10px] text-gray-600 mt-2">
+
+        {/* Inline TimeSlotPicker */}
+        {showBookingPicker && (
+          <div className="mt-2">
+            {bookingAndCampaign && (
+              <p className="text-[10px] text-green-400 mb-2">
+                Book a slot below — campaign will auto-generate after booking confirms.
+              </p>
+            )}
+            <TimeSlotPicker
+              embedded
+              dealId={dealId}
+              prefill={{
+                name: deal.contact_name || '',
+                email: deal.contact_email || '',
+                phone: deal.contact_phone || '',
+              }}
+              onBooked={handleBookingConfirmed}
+              onClose={() => { setShowBookingPicker(false); setBookingAndCampaign(false); }}
+            />
+          </div>
+        )}
+
+        {nextCallDate && !drafts.length && !showBookingPicker && (
+          <p className="text-[10px] text-gray-600">
             Set the call date, then Generate Campaign — touches will be intelligently spaced around this call.
           </p>
         )}

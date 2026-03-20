@@ -1,14 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
-import { getTenantFromSession } from '@/lib/tenant';
+import { requireTenantSession } from '@/lib/tenant';
 
 export async function GET() {
   try {
-    const tenant = await getTenantFromSession();
-
-    if (!tenant) {
-      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
-    }
+    const tenant = await requireTenantSession();
 
     const orgId = tenant.org_id;
 
@@ -38,24 +34,35 @@ export async function GET() {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const tenant = await getTenantFromSession();
+    const tenant = await requireTenantSession();
 
-    if (!tenant) {
-      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
-    }
     if (tenant.role !== 'admin') {
       return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
     }
 
     const orgId = tenant.org_id;
     const body = await request.json();
-    const { name, logo_url, domain, settings } = body;
+    const { name, slug, logo_url, domain, settings } = body;
 
     const updates: string[] = [];
     const values: unknown[] = [];
     let idx = 1;
 
     if (name !== undefined) { updates.push(`name = $${idx++}`); values.push(name); }
+    if (slug !== undefined) {
+      const cleanSlug = String(slug).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      if (!cleanSlug) {
+        return NextResponse.json({ error: 'Invalid slug' }, { status: 400 });
+      }
+      const existing = await queryOne<{ org_id: number }>(
+        `SELECT org_id FROM crm.organizations WHERE slug = $1 AND org_id != $2`,
+        [cleanSlug, orgId]
+      );
+      if (existing) {
+        return NextResponse.json({ error: 'Slug already in use by another organization' }, { status: 409 });
+      }
+      updates.push(`slug = $${idx++}`); values.push(cleanSlug);
+    }
     if (logo_url !== undefined) { updates.push(`logo_url = $${idx++}`); values.push(logo_url); }
     if (domain !== undefined) { updates.push(`domain = $${idx++}`); values.push(domain); }
     if (settings !== undefined) { updates.push(`settings = settings || $${idx++}::jsonb`); values.push(JSON.stringify(settings)); }

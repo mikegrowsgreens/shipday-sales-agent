@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryShipday } from '@/lib/db';
+import { query, queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 import { preprocessEmail } from '@/lib/email-tracking';
+import { getOrgConfigFromSession } from '@/lib/org-config';
+import { fetchWithTimeout } from '@/lib/fetch-with-timeout';
 
 /**
  * POST /api/followups/approve
@@ -9,6 +12,9 @@ import { preprocessEmail } from '@/lib/email-tracking';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const body = await request.json();
     const { draft_ids, send_at, deviation_minutes, schedule_map } = body as {
       draft_ids: number[];
@@ -21,17 +27,21 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'draft_ids required' }, { status: 400 });
     }
 
+    const config = await getOrgConfigFromSession();
+    const senderEmail = config.persona?.sender_email || 'noreply@example.com';
+    const n8nBase = process.env.N8N_BASE_URL || '';
+
     const placeholders = draft_ids.map((_, i) => `$${i + 1}`).join(',');
 
     // Update status to approved
-    await queryShipday(
-      `UPDATE shipday.email_drafts SET status = 'approved', approved_at = NOW(), updated_at = NOW()
-       WHERE id IN (${placeholders})`,
+    await queryDeals(
+      `UPDATE deals.email_drafts SET status = 'approved', approved_at = NOW(), updated_at = NOW()
+       WHERE draft_id IN (${placeholders})`,
       draft_ids,
     );
 
     // Get approved drafts with deal info
-    const approvedDrafts = await queryShipday<{
+    const approvedDrafts = await queryDeals<{
       id: number;
       deal_id: string;
       touch_number: number;
@@ -42,13 +52,13 @@ export async function POST(request: NextRequest) {
       contact_name: string;
       business_name: string;
     }>(
-      `SELECT ed.id, ed.deal_id, ed.touch_number, ed.subject,
+      `SELECT ed.draft_id as id, ed.deal_id, ed.touch_number, ed.subject,
               COALESCE(ed.body_html, '') as body_html,
               COALESCE(ed.body_plain, '') as body_plain,
               d.contact_email, d.contact_name, d.business_name
-       FROM shipday.email_drafts ed
-       JOIN shipday.deals d ON d.deal_id = ed.deal_id
-       WHERE ed.id IN (${placeholders})`,
+       FROM deals.email_drafts ed
+       JOIN deals.deals d ON d.deal_id = ed.deal_id
+       WHERE ed.draft_id IN (${placeholders})`,
       draft_ids,
     );
 
@@ -83,35 +93,35 @@ export async function POST(request: NextRequest) {
       }
 
       if (scheduledAt) {
-        await queryShipday(
-          `UPDATE shipday.email_drafts SET scheduled_at = $1, updated_at = NOW() WHERE id = $2`,
+        await queryDeals(
+          `UPDATE deals.email_drafts SET scheduled_at = $1, updated_at = NOW() WHERE draft_id = $2`,
           [scheduledAt, draft.id],
         );
       }
     }
 
     // Fire n8n webhook with tracking-enhanced email for each draft
-    const webhookUrl = `${process.env.N8N_BASE_URL || 'https://automation.mikegrowsgreens.com'}/webhook/followup-send-approved`;
+    const webhookUrl = `${n8nBase}/webhook/followup-send-approved`;
 
     for (const draft of approvedDrafts) {
       const draftSendAt = schedule_map?.[String(draft.id)] || computeDraftSendAt(draft.touch_number);
 
       try {
-        // Create email_sends record for tracking (uses wincall_brain DB / bdr schema)
+        // Create email_sends record for tracking (uses primary DB / bdr schema)
         // We need a lead_id — look up by contact_email
         const leadRow = await query<{ lead_id: number }>(
-          `SELECT lead_id FROM bdr.leads WHERE contact_email = $1 LIMIT 1`,
-          [draft.contact_email]
+          `SELECT lead_id FROM bdr.leads WHERE contact_email = $1 AND org_id = $2 LIMIT 1`,
+          [draft.contact_email, orgId]
         );
         const leadId = leadRow[0]?.lead_id;
 
         let sendId: string | undefined;
         if (leadId) {
           const sendRows = await query<{ id: string }>(
-            `INSERT INTO bdr.email_sends (lead_id, to_email, from_email, subject, body, angle, email_type, created_at)
-             VALUES ($1, $2, 'mike@mikegrowsgreens.com', $3, $4, 'followup', 'followup_touch', NOW())
+            `INSERT INTO bdr.email_sends (lead_id, to_email, from_email, subject, body, angle, email_type, org_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'followup', 'followup_touch', $6, NOW())
              RETURNING id`,
-            [leadId, draft.contact_email, draft.subject, draft.body_plain]
+            [leadId, draft.contact_email, senderEmail, draft.subject, draft.body_plain, orgId]
           );
           sendId = sendRows[0]?.id;
         }
@@ -123,7 +133,7 @@ export async function POST(request: NextRequest) {
           ? preprocessEmail(emailContent, sendId, isHtml)
           : emailContent;
 
-        await fetch(webhookUrl, {
+        await fetchWithTimeout(webhookUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -140,6 +150,7 @@ export async function POST(request: NextRequest) {
             ...(leadId && { lead_id: leadId }),
             ...(draftSendAt && { send_at: draftSendAt }),
           }),
+          timeout: 30000,
         });
       } catch (err) {
         console.error(`[followups/approve] webhook failed for draft ${draft.id}:`, err);
@@ -153,22 +164,22 @@ export async function POST(request: NextRequest) {
         .filter(d => d.deal_id === dealId)
         .map(d => d.touch_number);
 
-      await queryShipday(
-        `INSERT INTO shipday.activity_log (deal_id, action_type, notes, created_at)
+      await queryDeals(
+        `INSERT INTO deals.activity_log (deal_id, action_type, notes, created_at)
          VALUES ($1, 'drafts_approved', $2, NOW())`,
         [dealId, JSON.stringify({ touch_numbers: touchNumbers, send_at, deviation_minutes })],
       );
 
       // Check if all drafts for this deal are now approved or sent
-      const remaining = await queryShipday<{ cnt: string }>(
-        `SELECT COUNT(*) as cnt FROM shipday.email_drafts
+      const remaining = await queryDeals<{ cnt: string }>(
+        `SELECT COUNT(*) as cnt FROM deals.email_drafts
          WHERE deal_id = $1 AND status = 'draft'`,
         [dealId],
       );
       const pendingCount = parseInt(remaining[0]?.cnt || '0');
       if (pendingCount === 0) {
-        await queryShipday(
-          `UPDATE shipday.deals SET agent_status = 'completed', updated_at = NOW() WHERE deal_id = $1`,
+        await queryDeals(
+          `UPDATE deals.deals SET agent_status = 'completed', updated_at = NOW() WHERE deal_id = $1`,
           [dealId],
         );
       }

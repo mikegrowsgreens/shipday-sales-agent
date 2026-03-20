@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/signups/cohorts
@@ -11,11 +12,14 @@ import { query } from '@/lib/db';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
+
     const { searchParams } = new URL(request.url);
     const weeks = Math.min(parseInt(searchParams.get('weeks') || '12'), 52);
     const territory = searchParams.get('territory') || '';
 
-    const territoryFilter = territory === 'mine' ? 'AND territory_match = true' : '';
+    const territoryFilter = territory === 'mine' ? 'AND territory_match::boolean = true' : '';
 
     // Cohort progression: for each weekly cohort, count signups at each funnel stage
     const cohorts = await query<{
@@ -36,14 +40,15 @@ export async function GET(request: NextRequest) {
          COUNT(*) FILTER (WHERE funnel_stage = 'first_delivery')::text as first_delivery,
          COUNT(*) FILTER (WHERE funnel_stage = 'retained')::text as retained,
          COUNT(*) FILTER (WHERE funnel_stage = 'churned')::text as churned,
-         COUNT(*) FILTER (WHERE converted_to_lead = true)::text as converted
-       FROM crm.shipday_signups
+         COUNT(*) FILTER (WHERE converted_to_lead::boolean = true)::text as converted
+       FROM crm.inbound_leads
        WHERE COALESCE(cohort_week, DATE_TRUNC('week', COALESCE(signup_date, created_at))::date)
              >= NOW() - INTERVAL '1 week' * $1
+         AND org_id = $2
        ${territoryFilter}
        GROUP BY 1
        ORDER BY 1 DESC`,
-      [weeks]
+      [weeks, orgId]
     );
 
     // Funnel conversion rates (overall)
@@ -60,11 +65,12 @@ export async function GET(request: NextRequest) {
          COUNT(*) FILTER (WHERE funnel_stage IN ('first_delivery', 'retained'))::text as delivered,
          COUNT(*) FILTER (WHERE funnel_stage = 'retained')::text as retained,
          COUNT(*) FILTER (WHERE funnel_stage = 'churned')::text as churned
-       FROM crm.shipday_signups
+       FROM crm.inbound_leads
        WHERE COALESCE(cohort_week, DATE_TRUNC('week', COALESCE(signup_date, created_at))::date)
              >= NOW() - INTERVAL '1 week' * $1
+         AND org_id = $2
        ${territoryFilter}`,
-      [weeks]
+      [weeks, orgId]
     );
 
     const rates = funnelRates[0] || { total: '0', activated: '0', delivered: '0', retained: '0', churned: '0' };
@@ -73,8 +79,9 @@ export async function GET(request: NextRequest) {
     // Time to activation (avg days from signup to activation)
     const ttaRow = await query<{ avg_days: string }>(
       `SELECT ROUND(AVG(EXTRACT(EPOCH FROM (activated_at - COALESCE(signup_date, created_at))) / 86400), 1)::text as avg_days
-       FROM crm.shipday_signups
-       WHERE activated_at IS NOT NULL ${territoryFilter}`
+       FROM crm.inbound_leads
+       WHERE activated_at IS NOT NULL AND org_id = $1 ${territoryFilter}`,
+      [orgId]
     );
 
     return NextResponse.json({

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, query } from '@/lib/db';
-import { getTenantFromSession } from '@/lib/tenant';
+import { requireTenantSession } from '@/lib/tenant';
+import { sendingConfigSchema } from '@/lib/validators/settings';
 
 /**
  * GET /api/settings/sending
@@ -8,8 +9,8 @@ import { getTenantFromSession } from '@/lib/tenant';
  */
 export async function GET() {
   try {
-    const tenant = await getTenantFromSession();
-    const orgId = tenant?.org_id || 1;
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
 
     const org = await queryOne<{ settings: Record<string, unknown> }>(
       `SELECT settings FROM crm.organizations WHERE org_id = $1`,
@@ -44,17 +45,21 @@ export async function GET() {
  */
 export async function PATCH(request: NextRequest) {
   try {
-    const tenant = await getTenantFromSession();
-    if (tenant && tenant.role !== 'admin') {
+    const tenant = await requireTenantSession();
+    if (tenant.role !== 'admin') {
       return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
     }
-    const orgId = tenant?.org_id || 1;
+    const orgId = tenant.org_id;
 
     const body = await request.json();
+    const parsed = sendingConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors }, { status: 400 });
+    }
 
     await query(
       `UPDATE crm.organizations SET settings = settings || $1::jsonb, updated_at = NOW() WHERE org_id = $2`,
-      [JSON.stringify({ sending: body }), orgId]
+      [JSON.stringify({ sending: parsed.data }), orgId]
     );
 
     return NextResponse.json({ success: true });

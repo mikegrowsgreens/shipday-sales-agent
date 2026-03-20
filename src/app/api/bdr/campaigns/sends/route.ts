@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * POST /api/bdr/campaigns/sends
@@ -7,6 +8,8 @@ import { query } from '@/lib/db';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { lead_ids } = await request.json();
 
     if (!lead_ids || !Array.isArray(lead_ids) || lead_ids.length === 0) {
@@ -33,9 +36,9 @@ export async function POST(request: NextRequest) {
               open_count, first_open_at, click_count,
               replied, reply_at, reply_sentiment
        FROM bdr.email_sends
-       WHERE lead_id IN (${placeholders})
+       WHERE lead_id IN (${placeholders}) AND org_id = $${lead_ids.length + 1}
        ORDER BY sent_at ASC`,
-      lead_ids
+      [...lead_ids, orgId]
     );
 
     // Group by lead_id

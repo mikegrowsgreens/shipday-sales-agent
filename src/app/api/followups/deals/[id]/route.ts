@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryShipday, queryShipdayOne } from '@/lib/db';
+import { query, queryDeals, queryDealsOne } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 
 /**
  * GET /api/followups/deals/[id]
@@ -10,10 +11,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const { id } = await params;
 
-    const deal = await queryShipdayOne(
-      `SELECT * FROM shipday.deals WHERE deal_id = $1`,
+    const deal = await queryDealsOne(
+      `SELECT * FROM deals.deals WHERE deal_id = $1`,
       [id],
     );
 
@@ -21,17 +24,17 @@ export async function GET(
       return NextResponse.json({ error: 'Deal not found' }, { status: 404 });
     }
 
-    const drafts = await queryShipday(
-      `SELECT * FROM shipday.email_drafts WHERE deal_id = $1 ORDER BY touch_number ASC`,
+    const drafts = await queryDeals(
+      `SELECT * FROM deals.email_drafts WHERE deal_id = $1 ORDER BY touch_number ASC`,
       [id],
     );
 
-    const activity = await queryShipday(
-      `SELECT * FROM shipday.activity_log WHERE deal_id = $1 ORDER BY created_at DESC LIMIT 20`,
+    const activity = await queryDeals(
+      `SELECT * FROM deals.activity_log WHERE deal_id = $1 ORDER BY created_at DESC LIMIT 20`,
       [id],
     );
 
-    // Pull call notes from wincall_brain (public.calls) for this deal
+    // Pull call notes from primary DB (public.calls) for this deal
     // Match strategy: deal_id, attendee email, OR business name in call title
     const dealRecord = deal as { business_name?: string; contact_email?: string };
     const businessName = dealRecord.business_name || '';
@@ -75,6 +78,8 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
+    await requireTenantSession();
+
     const { id } = await params;
     const body = await request.json();
 
@@ -101,8 +106,8 @@ export async function PATCH(
     sets.push(`updated_at = NOW()`);
     values.push(id);
 
-    await queryShipday(
-      `UPDATE shipday.deals SET ${sets.join(', ')} WHERE deal_id = $${pi}`,
+    await queryDeals(
+      `UPDATE deals.deals SET ${sets.join(', ')} WHERE deal_id = $${pi}`,
       values,
     );
 

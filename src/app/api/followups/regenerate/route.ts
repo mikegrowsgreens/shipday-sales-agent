@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryShipdayOne, queryShipday } from '@/lib/db';
+import { queryDealsOne, queryDeals } from '@/lib/db';
+import { requireTenantSession } from '@/lib/tenant';
 import { regenerateFollowUpTouch } from '@/lib/ai';
+import { aiLimiter, checkRateLimit } from '@/lib/rate-limit';
 
 /**
  * POST /api/followups/regenerate
@@ -9,6 +11,12 @@ import { regenerateFollowUpTouch } from '@/lib/ai';
  */
 export async function POST(request: NextRequest) {
   try {
+    const ip = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    const rateLimitResponse = await checkRateLimit(aiLimiter, ip);
+    if (rateLimitResponse) return rateLimitResponse;
+
+    const tenant = await requireTenantSession();
+    const orgId = tenant.org_id;
     const body = await request.json();
     const { draft_id } = body as { draft_id: number };
 
@@ -17,15 +25,15 @@ export async function POST(request: NextRequest) {
     }
 
     // Load the draft
-    const draft = await queryShipdayOne<{
+    const draft = await queryDealsOne<{
       id: number;
       deal_id: string;
       touch_number: number;
       subject: string;
       body_plain: string;
     }>(
-      `SELECT id, deal_id, touch_number, subject, body_plain
-       FROM shipday.email_drafts WHERE id = $1`,
+      `SELECT draft_id as id, deal_id, touch_number, subject, body_plain
+       FROM deals.email_drafts WHERE draft_id = $1`,
       [draft_id],
     );
 
@@ -34,7 +42,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Load deal context
-    const deal = await queryShipdayOne<{
+    const deal = await queryDealsOne<{
       contact_name: string;
       business_name: string;
       contact_email: string;
@@ -45,7 +53,7 @@ export async function POST(request: NextRequest) {
     }>(
       `SELECT contact_name, contact_email, business_name, pipeline_stage,
               pain_points, fathom_summary, action_items
-       FROM shipday.deals WHERE deal_id = $1`,
+       FROM deals.deals WHERE deal_id = $1`,
       [draft.deal_id],
     );
 
@@ -54,9 +62,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Load other touches for context
-    const otherDrafts = await queryShipday<{ touch_number: number; subject: string }>(
-      `SELECT touch_number, subject FROM shipday.email_drafts
-       WHERE deal_id = $1 AND id != $2
+    const otherDrafts = await queryDeals<{ touch_number: number; subject: string }>(
+      `SELECT touch_number, subject FROM deals.email_drafts
+       WHERE deal_id = $1 AND draft_id != $2
        ORDER BY touch_number ASC`,
       [draft.deal_id, draft_id],
     );
@@ -85,18 +93,18 @@ export async function POST(request: NextRequest) {
     );
 
     // Update draft in DB
-    await queryShipday(
-      `UPDATE shipday.email_drafts
+    await queryDeals(
+      `UPDATE deals.email_drafts
        SET subject = $1, body_plain = $2, mike_edited = false, updated_at = NOW()
-       WHERE id = $3`,
+       WHERE draft_id = $3`,
       [result.subject, result.body, draft_id],
     );
 
     // Log activity
-    await queryShipday(
-      `INSERT INTO shipday.activity_log (deal_id, action_type, touch_number, notes, created_at)
-       VALUES ($1, 'touch_regenerated', $2, $3, NOW())`,
-      [draft.deal_id, draft.touch_number, JSON.stringify({ draft_id })],
+    await queryDeals(
+      `INSERT INTO deals.activity_log (deal_id, action_type, notes, created_at)
+       VALUES ($1, 'touch_regenerated', $2, NOW())`,
+      [draft.deal_id, JSON.stringify({ draft_id, touch_number: draft.touch_number })],
     );
 
     return NextResponse.json({

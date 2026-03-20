@@ -46,27 +46,51 @@ export async function getTenantFromSession(): Promise<TenantSession | null> {
 }
 
 /**
- * Wrap a SQL query to scope by org_id when tenant context is available.
- * Backward compatible: if no tenant session, returns all data (single-tenant mode).
+ * Require a valid tenant session or throw a 401 response.
+ * Use this at the top of every authenticated API route handler.
+ */
+export async function requireTenantSession(): Promise<TenantSession> {
+  const tenant = await getTenantFromSession();
+  if (!tenant) {
+    throw new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  return tenant;
+}
+
+/**
+ * Require admin role or throw 403.
+ */
+export async function requireAdminSession(): Promise<TenantSession> {
+  const tenant = await requireTenantSession();
+  if (tenant.role !== 'admin') {
+    throw new Response(JSON.stringify({ error: 'Forbidden' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  return tenant;
+}
+
+/**
+ * Wrap a SQL query to scope by org_id. Requires a valid orgId — never degrades to unscoped.
+ * Expects placeholder $TENANT in query which gets replaced with the correct parameter number.
  */
 export async function withTenant<T = Record<string, unknown>>(
   sql: string,
   params: unknown[] = [],
   orgId?: number
 ): Promise<T[]> {
-  if (orgId) {
-    // Inject org_id filter: expects placeholder $TENANT in query
-    const scopedSql = sql.replace('$TENANT', `$${params.length + 1}`);
-    return query<T>(scopedSql, [...params, orgId]);
+  if (!orgId) {
+    throw new Response(JSON.stringify({ error: 'Unauthorized: missing org context' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
-  // Single-tenant mode: strip $TENANT placeholder and WHERE clause
-  const cleanSql = sql
-    .replace(/AND\s+org_id\s*=\s*\$TENANT/gi, '')
-    .replace(/WHERE\s+org_id\s*=\s*\$TENANT\s*(AND)?/gi, (match) => {
-      return match.includes('AND') ? 'WHERE ' : '';
-    })
-    .replace(/WHERE\s*$/gi, '');
-  return query<T>(cleanSql, params);
+  const scopedSql = sql.replace('$TENANT', `$${params.length + 1}`);
+  return query<T>(scopedSql, [...params, orgId]);
 }
 
 /**

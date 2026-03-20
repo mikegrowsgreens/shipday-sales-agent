@@ -1,5 +1,7 @@
 'use client';
 
+import * as Sentry from '@sentry/nextjs';
+import { useEffect } from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
 
 export default function ErrorPage({
@@ -9,6 +11,10 @@ export default function ErrorPage({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  useEffect(() => {
+    Sentry.captureException(error);
+  }, [error]);
+
   return (
     <div className="flex items-center justify-center min-h-[60vh] p-6">
       <div className="text-center space-y-4 max-w-md">

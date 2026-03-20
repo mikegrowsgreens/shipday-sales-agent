@@ -35,3 +35,4 @@ tsconfig.tsbuildinfo
 
 # Misc
 *.tgz
+.cookies
