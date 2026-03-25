@@ -820,7 +820,12 @@ export default function ProspectChatPage() {
       {/* Header */}
       <header className="border-b border-gray-200 px-4 py-3 flex items-center justify-between shrink-0 bg-white z-10">
         <div className="flex items-center gap-3">
-          <span className="text-base font-semibold" style={{ color: BRAND.primaryDark }}>Sales Chat</span>
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: BRAND.primary }}>
+            <svg width="16" height="18" viewBox="0 0 24 27" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path fillRule="evenodd" clipRule="evenodd" d="M11.2 0.2L0.8 6.2C0.3 6.5 0 7 0 7.6V19.5C0 20.1 0.3 20.6 0.8 20.9L11.2 26.9C11.7 27.2 12.3 27.2 12.8 26.9L23.2 20.9C23.7 20.6 24 20.1 24 19.5V7.6C24 7 23.7 6.5 23.2 6.2L12.8 0.2C12.3-0.1 11.7-0.1 11.2 0.2ZM12 3.4L20.8 8.5V18.6L12 23.7V3.4Z" fill="white"/>
+            </svg>
+          </div>
+          <span className="text-base font-semibold" style={{ color: BRAND.primaryDark }}>Shipday</span>
         </div>
       </header>
 
@@ -831,9 +836,11 @@ export default function ProspectChatPage() {
           <div className="flex flex-col items-center justify-center h-full px-4 py-8">
             <div
               className="w-16 h-16 rounded-2xl flex items-center justify-center mb-6"
-              style={{ background: `linear-gradient(135deg, ${BRAND.primary}, ${BRAND.accentLight})` }}
+              style={{ background: BRAND.primary }}
             >
-              <MessageCircle className="w-8 h-8 text-white" />
+              <svg width="32" height="36" viewBox="0 0 24 27" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path fillRule="evenodd" clipRule="evenodd" d="M11.2 0.2L0.8 6.2C0.3 6.5 0 7 0 7.6V19.5C0 20.1 0.3 20.6 0.8 20.9L11.2 26.9C11.7 27.2 12.3 27.2 12.8 26.9L23.2 20.9C23.7 20.6 24 20.1 24 19.5V7.6C24 7 23.7 6.5 23.2 6.2L12.8 0.2C12.3-0.1 11.7-0.1 11.2 0.2ZM12 3.4L20.8 8.5V18.6L12 23.7V3.4Z" fill="white"/>
+              </svg>
             </div>
             <h2
               className="text-xl font-semibold mb-2 text-center"

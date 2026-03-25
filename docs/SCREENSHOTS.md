@@ -23,3 +23,22 @@ Inline SVG chart showing computed annual savings based on the demo qualification
 ![Booking](screenshots/booking.png)
 
 Agent presenting available time slots via tool calling. Calendar availability is real-time from Google Calendar.
+
+---
+
+## Mobile Views (390px)
+
+### 5. Welcome Screen (Mobile)
+![Welcome Mobile](screenshots/welcome-mobile.png)
+
+Full starter prompt list stacks into single column on mobile. 44px minimum touch targets maintained.
+
+### 6. Discovery Conversation (Mobile)
+![Discovery Mobile](screenshots/discovery-mobile.png)
+
+Discovery flow on mobile viewport. Message bubbles and quick-reply chips adapt to narrow width.
+
+### 7. ROI Computation (Mobile)
+![ROI Mobile](screenshots/roi-mobile.png)
+
+ROI breakdown and follow-up questions on mobile. Platform selection chips stack vertically.
